@@ -60,3 +60,19 @@ export const PlanReviewResultSchema = z.object({
   })).default([]).describe("Concrete, actionable problems only — empty when verdict is pass"),
 });
 export type PlanReviewResult = z.infer<typeof PlanReviewResultSchema>;
+
+export const TriageResultSchema = z.object({
+  status: z.enum(["completed", "blocked"]).describe("completed = a root cause was identified and a spec is ready; blocked = a human decision is needed before triage can proceed"),
+  summary: z.string().describe("2-5 sentence plain-language summary of the investigation, written for the issue's status comment"),
+  rootCause: z.string().describe("The underlying defect you identified — what is actually wrong in the code, not the symptom the reporter observed. Required even at low confidence; say what you believe and let the confidence score carry your uncertainty."),
+  evidence: z.array(z.string()).default([]).describe("Repo-relative `file:line` references that support the diagnosis, e.g. `src/storage.js:8`"),
+  confidence: z.number().int().min(0).max(100).describe("Whole-number percentage (0-100) expressing how confident you are that rootCause is correct and the spec below is implementable as written. Be honest and calibrated: 90+ means you traced the defect to specific lines and understand the fix; below 50 means you are guessing. This number gates whether the spec is auto-promoted to a coding worker without human review, so overstating it causes real harm."),
+  spec: z.object({
+    problem: z.string().describe("Markdown for the issue body's `## Problem` section — a self-contained statement of the defect"),
+    acceptanceCriteria: z.string().describe("Markdown for the `## Acceptance criteria` section — checkable conditions, one per line"),
+    verification: z.string().describe("Markdown for the `## Verification` section — the exact commands and manual steps that prove the fix"),
+  }).describe("A self-contained spec a coding agent could implement with no other context"),
+  suggestedTier: z.enum(["light", "standard", "elevated"]).optional().describe("Suggested model tier for the follow-on coding ticket: light = mechanical/small-surface, elevated = cross-cutting or design-heavy, standard = everything else (default)"),
+  blockedReason: z.string().optional().describe("The specific question or decision a human must answer (required when status is blocked)"),
+});
+export type TriageResult = z.infer<typeof TriageResultSchema>;
