@@ -371,9 +371,21 @@ In `packages/shared/src/tickets.ts`, in `TicketRecord`, next to `isPlan`:
 
 - [ ] **Step 4: Add the columns and migration**
 
-`packages/daemon/src/store/db.ts` holds the schema and migration helpers. Find where `isPlan` is declared in the `tickets` table and its column list, and add three columns alongside it in exactly the same style: `is_triage INTEGER`, `body_hash_at_claim TEXT`, `triage_confidence INTEGER`. Add each to the same idempotent `ALTER TABLE ... ADD COLUMN` migration list `isPlan` uses, and to the row↔record mapping functions in both directions.
+**No `store/db.ts` change is needed.** The `tickets` table is:
 
-Read the surrounding code before editing — mirror the existing boolean handling for `is_triage` (SQLite has no boolean type; `isPlan` is already stored as an integer and this must match it).
+```sql
+CREATE TABLE IF NOT EXISTS tickets (
+  project TEXT NOT NULL, issue_number INTEGER NOT NULL,
+  status TEXT NOT NULL, data TEXT NOT NULL,
+  PRIMARY KEY (project, issue_number)
+);
+```
+
+`upsertTicket` writes `JSON.stringify(record)` into `data`; `getTicket` parses it back. `project`, `issue_number`, and `status` are duplicated out purely as index keys. There are no per-field columns, no `ALTER TABLE` migrations, and no `is_plan` column — `isPlan` lives inside the JSON blob like everything else.
+
+So adding optional fields to `TicketRecord` is inherently backward-compatible: old rows simply lack the keys and read back as `undefined`. Booleans survive the JSON round-trip as real booleans, so `state.get()` returns `true`, not `1`.
+
+Corollary for later tasks: **triage tickets are not queryable in SQL.** Anything that needs "all triage tickets" reads through the existing all-tickets accessor and filters in JS.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -1601,5 +1613,5 @@ Checked against the spec, section by section:
 **Known gaps a reviewer should watch for:**
 
 - Tasks 10 and 12 contain test skeletons whose bodies must be written against harnesses that already exist in the repo (`loop.claim.test.ts` for driving a cycle, `FileTicketPanel.test.ts` for component mounting). Those are deliberate pointers to existing conventions rather than invented ones — but **a task is not complete while a test body is still a comment.** Task 11's tests are written out in full and can be used as the model for the shape the other two should end up in.
-- `store/db.ts` column work in Task 4 is described rather than shown, because the migration list's exact shape must be read before it is edited. Mirror `isPlan` precisely.
+- ~~`store/db.ts` column work in Task 4~~ — **corrected during execution.** The original plan asserted per-field SQLite columns and an `ALTER TABLE` migration list mirroring `isPlan`. No such thing exists: tickets are stored as a JSON blob in a `data` column. Task 4 above now reflects reality. No other task depended on the wrong premise.
 - The `addLabel` helper may or may not already exist in `github.ts`; Task 9 Step 1 says to add it if absent. Check before writing a duplicate.
