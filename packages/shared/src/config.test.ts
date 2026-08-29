@@ -1,25 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { ProjectConfigSchema } from "./index.ts";
 
+const base = { name: "p", repoPath: "/tmp/p", githubRepo: "o/p" };
+
 describe("triage config", () => {
-  it("defaults triage off and the threshold to 80", () => {
-    const parsed = ProjectConfigSchema.parse({
-      name: "p", repoPath: "/tmp/p", githubRepo: "o/p",
-    });
-    expect(parsed.triage).toBe(false);
-    expect(parsed.triageAutoPromoteThreshold).toBe(80);
+  it("defaults triage off", () => {
+    expect(ProjectConfigSchema.parse(base).triage).toBe(false);
+  });
+});
+
+describe("confidence config", () => {
+  it("defaults confidenceThreshold to 70 and triageAutoPromote to true", () => {
+    const parsed = ProjectConfigSchema.parse(base);
+    expect(parsed.confidenceThreshold).toBe(70);
+    expect(parsed.triageAutoPromote).toBe(true);
   });
 
-  it("accepts 101 as the never-auto-promote sentinel", () => {
-    const parsed = ProjectConfigSchema.parse({
-      name: "p", repoPath: "/tmp/p", githubRepo: "o/p", triageAutoPromoteThreshold: 101,
-    });
-    expect(parsed.triageAutoPromoteThreshold).toBe(101);
+  it("rejects a threshold above 100 or below 0", () => {
+    expect(ProjectConfigSchema.safeParse({ ...base, confidenceThreshold: 101 }).success).toBe(false);
+    expect(ProjectConfigSchema.safeParse({ ...base, confidenceThreshold: -1 }).success).toBe(false);
   });
 
-  it("rejects a threshold above 101 or below 0", () => {
-    const base = { name: "p", repoPath: "/tmp/p", githubRepo: "o/p" };
-    expect(ProjectConfigSchema.safeParse({ ...base, triageAutoPromoteThreshold: 102 }).success).toBe(false);
-    expect(ProjectConfigSchema.safeParse({ ...base, triageAutoPromoteThreshold: -1 }).success).toBe(false);
+  it("rejects a config still carrying the removed triageAutoPromoteThreshold", () => {
+    const result = ProjectConfigSchema.safeParse({ ...base, triageAutoPromoteThreshold: 101 });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).toContain("confidenceThreshold");
   });
 });

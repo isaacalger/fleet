@@ -337,17 +337,21 @@ export async function finishTriaged(
   // missing claim-time hash routes to "commented" — failing closed.
   const written = await appendTriageSpecSafely(project, issue.number, spec, record?.bodyHashAtClaim ?? "");
 
+  // Interim inline gate — task 8 replaces this with the shared confidence gate.
   const promote =
     result.status === "completed" &&
     written === "appended" &&
-    result.confidence >= project.triageAutoPromoteThreshold;
+    project.triageAutoPromote &&
+    result.confidence >= project.confidenceThreshold;
 
   const held =
     written === "commented"
       ? "the issue body was edited while triage was running"
       : result.status === "blocked"
         ? `triage is blocked: ${result.blockedReason ?? "no reason given"}`
-        : `confidence ${result.confidence}% is below the ${project.triageAutoPromoteThreshold}% auto-promote threshold`;
+        : !project.triageAutoPromote
+          ? "triage auto-promote is disabled for this project"
+          : `confidence ${result.confidence}% is below the ${project.confidenceThreshold}% auto-promote threshold`;
 
   try {
     await upsertStatusComment(project, issue.number, [

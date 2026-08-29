@@ -7,6 +7,13 @@ import { FleetConfigSchema, ProjectConfigSchema } from "./index.ts";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const examplePath = join(repoRoot, "fleet.config.example.json");
 
+/**
+ * Removal shims: keys kept on the schema only to reject a config that still
+ * sets them. They must never appear in the example file, so the coverage
+ * assertions below skip them.
+ */
+const REMOVED_PROJECT_FIELDS = new Set(["triageAutoPromoteThreshold"]);
+
 describe("fleet.config.example.json", () => {
   it("has no UTF-8 BOM", () => {
     const bytes = readFileSync(examplePath);
@@ -31,6 +38,10 @@ describe("fleet.config.example.json", () => {
     const example = JSON.parse(raw) as { projects: Record<string, unknown>[] };
     for (const project of example.projects) {
       for (const key of Object.keys(ProjectConfigSchema.shape)) {
+        if (REMOVED_PROJECT_FIELDS.has(key)) {
+          expect(Object.keys(project), `removed project field "${key}"`).not.toContain(key);
+          continue;
+        }
         expect(Object.keys(project), `missing project field "${key}"`).toContain(key);
       }
     }

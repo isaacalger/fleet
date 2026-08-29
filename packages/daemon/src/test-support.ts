@@ -32,7 +32,8 @@ export function makeProject(patch: Partial<ProjectConfig> = {}): ProjectConfig {
     autoAddressReviews: true,
     machineReview: false,
     triage: false,
-    triageAutoPromoteThreshold: 80,
+    confidenceThreshold: 70,
+    triageAutoPromote: true,
     // Off by default here (schema default is true) so the hundreds of
     // existing claim-flow tests using `makeIssue`'s empty body don't all
     // start failing intake lint — opt in per test with `{ intakeLint: true }`.

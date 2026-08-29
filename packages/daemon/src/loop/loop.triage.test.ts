@@ -89,7 +89,7 @@ beforeEach(() => {
 function setup(threshold: number) {
   const ctx = makeCtx();
   ctx.state.upsert(makeRecord({ project: "alpha", issueNumber: 7, isTriage: true, bodyHashAtClaim: "h" }));
-  const project = makeProject({ triage: true, triageAutoPromoteThreshold: threshold });
+  const project = makeProject({ triage: true, confidenceThreshold: threshold });
   return { ctx, project, issue: makeIssue(7) };
 }
 
@@ -294,7 +294,7 @@ describe("supervise triage routing", () => {
   it("routes a completed triage turn to finishTriaged", async () => {
     const ctx = makeCtx();
     ctx.state.upsert(makeRecord({ issueNumber: 7, isTriage: true, bodyHashAtClaim: "h" }));
-    const project = makeProject({ triage: true, triageAutoPromoteThreshold: 80 });
+    const project = makeProject({ triage: true, confidenceThreshold: 80 });
     const issue = makeIssue(7, ["fleet:in-progress"]);
     await supervise(ctx, project, issue, worktree, fakeSession({ kind: "triage", result: RESULT }), base);
     expect(finish.finishTriaged).toHaveBeenCalledTimes(1);
