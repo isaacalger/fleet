@@ -1,4 +1,4 @@
-import { FLEET_LABELS, lintIntakeBody, PLAN_LABEL, SECTION_LABELS, type ProjectConfig } from "@fleet/shared";
+import { FLEET_LABELS, lintIntakeBody, PLAN_LABEL, SECTION_LABELS, TRIAGE_LABEL, type ProjectConfig } from "@fleet/shared";
 import { key, type LoopContext } from "./context.ts";
 import { swapLabel, upsertStatusComment, type ReadyIssue } from "../github/github.ts";
 import { log, logError } from "../log.ts";
@@ -21,6 +21,20 @@ export async function applyIntakeLint(ctx: LoopContext, project: ProjectConfig, 
 
   const passing: ReadyIssue[] = [];
   for (const issue of issues) {
+    // A triage candidate is by definition a half-formed report — producing the
+    // problem/acceptance/verification sections is the whole point of the
+    // investigation, so linting for them here would reject every one of them
+    // (and swap a `fleet:ready` it never had).
+    // Mirrors `selectEligibleReady`'s precedence: `fleet:ready` (and `fleet:plan`) beat `fleet:triage`.
+    if (
+      project.triage === true &&
+      !issue.labels.includes(FLEET_LABELS.ready) &&
+      !issue.labels.includes(PLAN_LABEL) &&
+      issue.labels.includes(TRIAGE_LABEL)
+    ) {
+      passing.push(issue);
+      continue;
+    }
     const missing = lintIntakeBody(issue.body, { isPlan: issue.labels.includes(PLAN_LABEL) });
     if (missing.length === 0) {
       passing.push(issue);

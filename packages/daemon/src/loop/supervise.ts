@@ -1,6 +1,6 @@
 import { mergeModelUsage, type PlanResult, type ProjectConfig } from "@fleet/shared";
 import { key, markWorking, type LoopContext, type SessionBase } from "./context.ts";
-import { finishBlocked, finishCompleted, finishFailed, finishPlanned } from "./finish.ts";
+import { finishBlocked, finishCompleted, finishFailed, finishPlanned, finishTriaged } from "./finish.ts";
 import { MAX_TICKET_TIMEOUT_MINUTES, getIssueComments, parseTicketTimeoutMinutes, upsertStatusComment, type ReadyIssue } from "../github/github.ts";
 import { Journal } from "../store/journal.ts";
 import { log, logError } from "../log.ts";
@@ -69,6 +69,18 @@ export async function supervise(
         const parked = await park(ctx, project, issue, session, turn.result, "Planner reported blocked without a reason.");
         if (parked === "closed") return;
         continue;
+      }
+      await finishFailed(ctx, project, issue, formatTurnError(turn));
+      return;
+    }
+
+    if (turn.kind === "triage") {
+      // A blocked triage goes to `finishTriaged` rather than `park`: the spec it
+      // did produce is still worth writing back, and `finishTriaged` already
+      // routes a blocked result to `fleet:needs-input`.
+      if (turn.result?.status === "completed" || turn.result?.status === "blocked") {
+        await finishTriaged(ctx, project, issue, turn.result);
+        return;
       }
       await finishFailed(ctx, project, issue, formatTurnError(turn));
       return;
