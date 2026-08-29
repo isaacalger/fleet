@@ -32,6 +32,12 @@ export interface TicketRecord {
   light?: boolean;
   autoResumed?: boolean;
   isPlan?: boolean;
+  /** True when this ticket was claimed from a `fleet:triage` label — a read-only investigation, not a coding run. */
+  isTriage?: boolean;
+  /** SHA-256 of the issue body as it stood when the triage session opened, used to detect concurrent human edits at finish time. */
+  bodyHashAtClaim?: string;
+  /** The confidence percentage (0-100) the triage session reported, kept so the threshold can be tuned against observed outcomes. */
+  triageConfidence?: number;
   /** Set once this ticket has auto-retried on the elevated model after a failure — caps escalation to once, ever. */
   autoElevated?: boolean;
   /** The epic issue number this ticket was filed under, parsed from its `Part-of: #<epic>` body line at claim time. */
