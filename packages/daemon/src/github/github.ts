@@ -488,6 +488,14 @@ export function getPushCollaborators(project: ProjectConfig): Promise<Set<string
  * issue with *both* fleet labels (visible on the board, fixable by a human)
  * instead of neither (invisible to every recovery path).
  */
+export async function addLabel(project: ProjectConfig, issueNumber: number, label: string): Promise<void> {
+  await run("gh", [
+    "issue", "edit", String(issueNumber),
+    "--repo", project.githubRepo,
+    "--add-label", label,
+  ]);
+}
+
 export async function swapLabel(project: ProjectConfig, issueNumber: number, from: string, to: string): Promise<void> {
   await run("gh", [
     "issue", "edit", String(issueNumber),

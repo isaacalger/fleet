@@ -5,9 +5,12 @@ import {
   type PlanResult,
   type ProjectConfig,
   type TicketRecord,
+  type TriageResult,
 } from "@fleet/shared";
 import { key, type LoopContext } from "./context.ts";
 import {
+  addLabel,
+  appendTriageSpecSafely,
   bodyWithChildTaskList,
   bodyWithDependsOn,
   bodyWithPartOf,
@@ -28,6 +31,7 @@ import { log, logError } from "../log.ts";
 import { hasCommits, pushBranch } from "../github/worktree.ts";
 import { gatherFailurePostMortem } from "./postmortem.ts";
 import { issueUrl, notify } from "../notify.ts";
+import { renderTriageSpec } from "./triage.ts";
 
 const PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
 
@@ -297,6 +301,80 @@ async function hasExistingChildren(project: ProjectConfig, issue: ReadyIssue): P
     logError("loop", `${key(project.name, issue.number)}: could not check for existing children — proceeding to file`, err);
     return false;
   }
+}
+
+/**
+ * Terminal path for a triage session. Writes the spec into the issue body when
+ * no human edited it mid-run, then promotes to `fleet:ready` only when the run
+ * completed cleanly and its confidence meets the project threshold.
+ *
+ * Triage fails closed, the inverse of machine review's fail-open: a collision,
+ * a blocked result, or any error holds the ticket for a human. A failed review
+ * costs a missed check; a triage that promoted on a failure would start an
+ * unsupervised coding session on an undiagnosed bug.
+ */
+export async function finishTriaged(
+  ctx: LoopContext,
+  project: ProjectConfig,
+  issue: ReadyIssue,
+  result: TriageResult,
+): Promise<void> {
+  const scope = key(project.name, issue.number);
+  const record = ctx.state.get(project.name, issue.number);
+  ctx.state.update(project.name, issue.number, { triageConfidence: result.confidence });
+
+  const spec = renderTriageSpec(result);
+  // `?? ""` is deliberate: an empty string can never equal a real SHA-256, so a
+  // missing claim-time hash routes to "commented" — failing closed.
+  const written = await appendTriageSpecSafely(project, issue.number, spec, record?.bodyHashAtClaim ?? "");
+
+  const promote =
+    result.status === "completed" &&
+    written === "appended" &&
+    result.confidence >= project.triageAutoPromoteThreshold;
+
+  const held =
+    written === "commented"
+      ? "the issue body was edited while triage was running"
+      : result.status === "blocked"
+        ? `triage is blocked: ${result.blockedReason ?? "no reason given"}`
+        : `confidence ${result.confidence}% is below the ${project.triageAutoPromoteThreshold}% auto-promote threshold`;
+
+  try {
+    await upsertStatusComment(project, issue.number, [
+      `**Triage complete** — confidence ${result.confidence}%`,
+      "",
+      `**Root cause:** ${result.rootCause}`,
+      ...(result.evidence.length > 0 ? ["", "**Evidence:**", ...result.evidence.map((e) => `- \`${e}\``)] : []),
+      "",
+      result.summary,
+      "",
+      promote
+        ? "Promoted to `fleet:ready` — a coding worker will claim it on a later cycle."
+        : `Held for review — ${held}.`,
+    ].join("\n"));
+  } catch (err) {
+    logError("loop", `${scope}: could not post the triage status comment`, err);
+  }
+
+  if (promote) {
+    // Tier labels go on before the swap so the issue is never briefly
+    // `fleet:ready` without its tier — the claim loop could otherwise pick it
+    // up mid-write on the wrong model.
+    if (result.suggestedTier === "light") await addLabel(project, issue.number, LIGHT_LABEL);
+    if (result.suggestedTier === "elevated") await addLabel(project, issue.number, ELEVATE_LABEL);
+    await swapLabel(project, issue.number, FLEET_LABELS.inProgress, FLEET_LABELS.ready);
+    // No dedicated "ready" ticket status exists; `restarting` is documented as
+    // "the issue is back in `fleet:ready`, awaiting a fresh claim", which is
+    // exactly where a promoted triage leaves it.
+    ctx.state.update(project.name, issue.number, { status: "restarting", lastSummary: result.summary });
+  } else {
+    await swapLabel(project, issue.number, FLEET_LABELS.inProgress, FLEET_LABELS.needsInput);
+    ctx.state.update(project.name, issue.number, { status: "needs-input", lastSummary: result.summary });
+  }
+  ctx.emitBoard();
+
+  log("loop", `${scope}: triage ${promote ? "promoted to fleet:ready" : "held for review"} at ${result.confidence}% confidence`);
 }
 
 export async function finishBlocked(
