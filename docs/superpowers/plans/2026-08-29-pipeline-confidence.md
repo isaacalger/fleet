@@ -190,7 +190,24 @@ In `PlanReviewResultSchema`, add the same field with `"...expressing how confide
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pnpm vitest run --root . packages/shared -t "Confidence" && pnpm typecheck`
-Expected: PASS. Typecheck will now FAIL in `packages/daemon` on `confidence: string` — that is expected and fixed in Task 6. Note the failures and continue.
+Expected: PASS.
+
+Making `confidence` required on the review schemas, and numeric on the worker
+and plan ones, breaks `packages/daemon` typecheck in ~26 places. Fix them all
+here rather than deferring — a typecheck left red across ten tasks stops being
+a signal:
+
+- `loop/finish.ts:128` and `loop/loop.ts:283` declare `confidence: string`;
+  change both to `number`. This is production source and it is what makes
+  `supervise.ts:95` fail to compile.
+- Render the score as a percentage in the three status comments that
+  interpolate it: `finish.ts:162`, `:231`, `:283` → `${result.confidence}%`.
+- Existing test fixtures in `session/review.test.ts`,
+  `loop/loop.machinereview.test.ts`, and `loop/finish.test.ts` construct
+  results with a string confidence or without the now-required field. Give each
+  a numeric value, defaulting to 90 — comfortably above the 70 threshold Task 3
+  introduces, so a fixture doesn't silently start exercising the hold path in
+  an unrelated test once Task 6 lands.
 
 - [ ] **Step 4b: Add a regression guard for the JSON Schema conversion**
 
