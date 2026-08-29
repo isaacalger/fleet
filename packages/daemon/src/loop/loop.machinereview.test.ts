@@ -21,6 +21,8 @@ vi.mock("../github/github.ts", () => ({
   upsertStatusComment: vi.fn(async () => {}),
   clearAssignees: vi.fn(async () => {}),
   closePullRequest: vi.fn(async () => {}),
+  getIssue: vi.fn(async () => undefined),
+  removeLabel: vi.fn(async () => {}),
 }));
 
 vi.mock("../github/worktree.ts", () => ({
@@ -72,14 +74,14 @@ function makeLoop(seed?: TicketRecord, opts: { dryRun?: boolean } = {}) {
       w: typeof worktree,
       base: { costUsd: number; modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }> },
       report: { summary: string; prBody?: string },
-    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }>;
+    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }>;
     planReviewGate: (
       p: ProjectConfig,
       i: typeof issue,
       w: typeof worktree,
       base: { costUsd: number; modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }> },
       result: PlanResult,
-    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }>;
+    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }>;
     resetForFreshClaim: (p: ProjectConfig, issueNumber: number) => Promise<void>;
   };
   return { loop, state, internals };
@@ -272,6 +274,21 @@ describe("machineReviewGate", () => {
     expect(review.runMachineReview).not.toHaveBeenCalled();
   });
 
+  it("holds when a passing review reports low confidence in itself", async () => {
+    vi.mocked(review.runMachineReview).mockResolvedValue(
+      reviewOutcome({ result: { verdict: "pass", summary: "Probably fine?", confidence: 40, findings: [] } }),
+    );
+    const { state, internals } = makeLoop(record());
+
+    const gate = await internals.machineReviewGate(project, issue, worktree, { costUsd: 0 }, workerReport);
+
+    expect(gate.action).toBe("hold");
+    if (gate.action === "hold") expect(gate.reason).toContain("machine-review confidence 40%");
+    expect(worktreeMod.pushBranch).not.toHaveBeenCalled();
+    expect(github.createPullRequest).not.toHaveBeenCalled();
+    expect(state.get("alpha", 7)?.confidenceHistory?.at(-1)?.score).toBe(40);
+  });
+
   it("skips an empty branch — that's finishCompleted's blocked-guard territory", async () => {
     vi.mocked(worktreeMod.hasCommits).mockResolvedValue(false);
     const { state, internals } = makeLoop(record());
@@ -355,6 +372,19 @@ describe("planReviewGate", () => {
     expect(gate).toEqual({ action: "proceed" });
     expect(state.get("alpha", 7)?.machineReviewOutcome).toBe("skipped");
     expect(state.getPausedUntil()).toBe(new Date(Date.parse("2026-07-27T12:00:00.000Z") + 5 * 60_000).toISOString());
+  });
+
+  it("holds when a passing plan review reports low confidence in itself", async () => {
+    vi.mocked(review.runPlanReview).mockResolvedValue(
+      planReviewOutcome({ result: { verdict: "pass", summary: "Probably fine?", confidence: 40, findings: [] } }),
+    );
+    const { state, internals } = makeLoop(record());
+
+    const gate = await internals.planReviewGate(project, issue, worktree, { costUsd: 0 }, planResult());
+
+    expect(gate.action).toBe("hold");
+    if (gate.action === "hold") expect(gate.reason).toContain("plan-review confidence 40%");
+    expect(state.get("alpha", 7)?.confidenceHistory?.at(-1)?.score).toBe(40);
   });
 
   it("never runs when the project opts out — shares the machineReview switch with the code-review gate", async () => {

@@ -260,7 +260,7 @@ export class FleetLoop {
     worktree: Worktree,
     base: SessionBase,
     workerReport: { summary: string; prBody?: string },
-  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }> {
+  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }> {
     return machineReviewGate(this.ctx, project, issue, worktree, base, workerReport);
   }
 
@@ -270,7 +270,7 @@ export class FleetLoop {
     worktree: Worktree,
     base: SessionBase,
     result: PlanResult,
-  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }> {
+  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }> {
     return planReviewGate(this.ctx, project, issue, worktree, base, result);
   }
 
