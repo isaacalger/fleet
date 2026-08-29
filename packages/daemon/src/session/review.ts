@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   MachineReviewResultSchema,
   PlanReviewResultSchema,
+  normalizeLegacyConfidence,
   type Effort,
   type MachineReviewResult,
   type ModelUsageSummary,
@@ -397,7 +398,7 @@ export async function runMachineReview(opts: {
     journalSession: "machine-review",
     logLabel: "machine reviewer",
     parseResult: (structuredOutput) => {
-      const parsed = MachineReviewResultSchema.safeParse(structuredOutput);
+      const parsed = MachineReviewResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
       return parsed.success ? parsed.data : undefined;
     },
   });
@@ -421,7 +422,7 @@ export async function runPlanReview(opts: {
     journalSession: "plan-review",
     logLabel: "plan reviewer",
     parseResult: (structuredOutput) => {
-      const parsed = PlanReviewResultSchema.safeParse(structuredOutput);
+      const parsed = PlanReviewResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
       return parsed.success ? parsed.data : undefined;
     },
   });

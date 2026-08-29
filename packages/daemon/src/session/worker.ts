@@ -5,6 +5,7 @@ import {
   PlanResultSchema,
   TriageResultSchema,
   WorkerResultSchema,
+  normalizeLegacyConfidence,
   type Effort,
   type ModelUsageSummary,
   type PlanResult,
@@ -503,16 +504,16 @@ export class WorkerSession {
           if (message.subtype === "success") {
             const structuredOutput = message.structured_output;
             if (this.kind === "triage") {
-              const parsed = TriageResultSchema.safeParse(structuredOutput);
+              const parsed = TriageResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
               if (parsed.success) return { kind: "triage", result: normalizeTriageResult(parsed.data) };
               return { kind: "triage", errorSubtype: "invalid_structured_output", terminalReason: message.terminal_reason };
             }
             if (this.kind === "plan") {
-              const parsed = PlanResultSchema.safeParse(structuredOutput);
+              const parsed = PlanResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
               if (parsed.success) return { kind: "plan", result: normalizePlanResult(parsed.data) };
               return { kind: "plan", errorSubtype: "invalid_structured_output", terminalReason: message.terminal_reason };
             }
-            const parsed = WorkerResultSchema.safeParse(structuredOutput);
+            const parsed = WorkerResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
             if (parsed.success) return { kind: "code", result: normalizeResult(parsed.data) };
             return { kind: "code", errorSubtype: "invalid_structured_output", terminalReason: message.terminal_reason };
           }
