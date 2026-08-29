@@ -504,7 +504,7 @@ export class WorkerSession {
             const structuredOutput = message.structured_output;
             if (this.kind === "triage") {
               const parsed = TriageResultSchema.safeParse(structuredOutput);
-              if (parsed.success) return { kind: "triage", result: parsed.data };
+              if (parsed.success) return { kind: "triage", result: normalizeTriageResult(parsed.data) };
               return { kind: "triage", errorSubtype: "invalid_structured_output", terminalReason: message.terminal_reason };
             }
             if (this.kind === "plan") {
@@ -689,6 +689,27 @@ function normalizePlanResult(result: PlanResult): PlanResult {
     summary: unescapeNewlines(result.summary),
     blockedReason: result.blockedReason ? unescapeNewlines(result.blockedReason) : result.blockedReason,
     tickets: result.tickets.map((t) => ({ ...t, body: unescapeNewlines(t.body) })),
+  };
+}
+
+/**
+ * Same double-escape repair as `normalizeResult`/`normalizePlanResult`, over the
+ * five markdown fields a triage result renders into GitHub: the status comment's
+ * `summary`/`blockedReason`, and the three `spec` sections `renderTriageSpec`
+ * turns into a promoted issue body that a coding worker then reads back. Left
+ * alone: `rootCause` and `evidence[]` are short single-line values.
+ */
+export function normalizeTriageResult(result: TriageResult): TriageResult {
+  return {
+    ...result,
+    summary: unescapeNewlines(result.summary),
+    blockedReason: result.blockedReason ? unescapeNewlines(result.blockedReason) : result.blockedReason,
+    spec: {
+      ...result.spec,
+      problem: unescapeNewlines(result.spec.problem),
+      acceptanceCriteria: unescapeNewlines(result.spec.acceptanceCriteria),
+      verification: unescapeNewlines(result.spec.verification),
+    },
   };
 }
 
