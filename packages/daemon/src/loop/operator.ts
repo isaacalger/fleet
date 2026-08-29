@@ -1,6 +1,6 @@
-import { FLEET_LABELS, type ProjectConfig } from "@fleet/shared";
+import { FLEET_LABELS, TRIAGE_LABEL, type ProjectConfig } from "@fleet/shared";
 import { key, track, type LoopContext } from "./context.ts";
-import { clearAssignees, closeIssue, closePullRequest, markReady, upsertStatusComment } from "../github/github.ts";
+import { clearAssignees, closeIssue, closePullRequest, markReady, markTriage, upsertStatusComment } from "../github/github.ts";
 import { deleteRemoteBranch } from "../github/worktree.ts";
 import { Journal } from "../store/journal.ts";
 import { log, logError } from "../log.ts";
@@ -252,9 +252,15 @@ export async function resetForFreshClaim(
   await clearAssignees(project, issueNumber);
   // Label last: from here the ticket is claimable, so nothing after this may
   // write to the state record.
-  await markReady(project, issueNumber);
+  //
+  // A restarted triage goes back to `fleet:triage`, not `fleet:ready`: the
+  // claim consumed the triage label, and the issue body still holds nothing but
+  // the reporter's original report, so `markReady` here would start a blind
+  // coding session on an undiagnosed bug. Restart re-runs the investigation.
+  if (prior?.isTriage) await markTriage(project, issueNumber);
+  else await markReady(project, issueNumber);
   ctx.emitBoard();
-  log("loop", `${scope}: reset to ${FLEET_LABELS.ready} for a fresh session`);
+  log("loop", `${scope}: reset to ${prior?.isTriage ? TRIAGE_LABEL : FLEET_LABELS.ready} for a fresh session`);
   // Best-effort: the ticket is already restarted, so a failed comment is worth
   // logging but not worth reporting back as a failed restart.
   try {

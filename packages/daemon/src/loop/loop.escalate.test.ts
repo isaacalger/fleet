@@ -48,6 +48,13 @@ describe("shouldAutoElevate", () => {
   it("escalates when the record has neither flag set", () => {
     expect(shouldAutoElevate({ elevatedModel: "claude-opus-5" }, { elevated: false, autoElevated: false })).toBe(true);
   });
+
+  // Escalation routes through `fleet:ready`, and a triage claim consumes
+  // `fleet:triage` — so escalating a triage means the next claim runs it as
+  // code on an undiagnosed bug. Triage fails closed instead.
+  it("never escalates a triage, even with everything else eligible", () => {
+    expect(shouldAutoElevate({ elevatedModel: "claude-opus-5" }, { isTriage: true, elevated: false, autoElevated: false })).toBe(false);
+  });
 });
 
 const project = makeProject({ elevatedModel: "claude-opus-5" });

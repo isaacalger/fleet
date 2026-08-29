@@ -204,6 +204,47 @@ describe("finishFailed — auto-elevation", () => {
       }),
     );
   });
+
+  /** `finishFailed` for real (not stubbed) against an elevating project, so the labels it actually writes are observable. */
+  function makeElevatingLoop(seed: TicketRecord) {
+    const elevatingProject = makeProject({ elevatedModel: "claude-opus-5" });
+    const { dataDir, state } = makeTempState("fleet-finish-triage-");
+    state.upsert(seed);
+    const config = makeFleetConfig({ dataDir, projects: [elevatingProject] });
+    const loop = new FleetLoop(config, state, dataDir, makeApprovals(), false);
+    const internals = loop as unknown as {
+      finishFailed: (p: ProjectConfig, i: typeof issue, error: string) => Promise<void>;
+    };
+    return { elevatingProject, state, internals };
+  }
+
+  it("parks a failed triage in fleet:needs-input instead of escalating it into a fleet:ready coding session", async () => {
+    const { elevatingProject, state, internals } = makeElevatingLoop(record({ isTriage: true, model: "claude-sonnet-5" }));
+
+    await internals.finishFailed(elevatingProject, issue, "invalid_structured_output");
+
+    // The whole point: escalation would `--add-label fleet:elevate --add-label
+    // fleet:ready`, and the triage label was consumed at claim — so the next
+    // claim would run an *elevated code session* on an undiagnosed bug.
+    expect(github.escalateToElevated).not.toHaveBeenCalled();
+    expect(github.swapLabel).toHaveBeenCalledWith(elevatingProject, 7, "fleet:in-progress", "fleet:needs-input");
+    expect(github.swapLabel).not.toHaveBeenCalledWith(elevatingProject, 7, "fleet:in-progress", "fleet:ready");
+    expect(github.markReady).not.toHaveBeenCalled();
+    const updated = state.get("alpha", 7);
+    expect(updated?.status).toBe("failed");
+    // Never burns the once-only escalation budget either — it was never eligible.
+    expect(updated?.autoElevated).toBeUndefined();
+  });
+
+  it("still auto-escalates a failed code ticket — the triage guard is scoped to triage only", async () => {
+    const { elevatingProject, state, internals } = makeElevatingLoop(record({ isTriage: false, model: "claude-sonnet-5" }));
+
+    await internals.finishFailed(elevatingProject, issue, "the model gave up");
+
+    expect(github.escalateToElevated).toHaveBeenCalledWith(elevatingProject, 7);
+    expect(github.swapLabel).not.toHaveBeenCalledWith(elevatingProject, 7, "fleet:in-progress", "fleet:needs-input");
+    expect(state.get("alpha", 7)?.autoElevated).toBe(true);
+  });
 });
 
 describe("resolveDependsOnIndex", () => {

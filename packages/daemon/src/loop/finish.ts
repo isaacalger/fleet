@@ -77,12 +77,21 @@ export function machineReviewLine(outcome: TicketRecord["machineReviewOutcome"])
  * fix, and with no record the `autoElevated: true` write-back would silently
  * no-op, turning "once" into an unbounded claim→fail→escalate loop. Those
  * failures park in `fleet:needs-input` for a human instead.
+ *
+ * A triage never escalates. Re-running a failed *investigation* on a stronger
+ * model would be defensible in principle, but escalation as implemented moves
+ * the issue to `fleet:ready` (`escalateLabelArgs`) — and claiming a triage
+ * consumes its `fleet:triage` label, so the next claim sees a plain ready issue
+ * and runs it as CODE against a bug nothing has diagnosed yet. Escalation and
+ * triage's fail-closed contract are therefore incompatible: a failed triage
+ * parks in `fleet:needs-input` for a human, always.
  */
 export function shouldAutoElevate(
   project: { elevatedModel?: string; autoElevateOnFailure?: boolean },
-  record: { elevated?: boolean; autoElevated?: boolean } | undefined,
+  record: { elevated?: boolean; autoElevated?: boolean; isTriage?: boolean } | undefined,
 ): boolean {
   if (!record) return false;
+  if (record.isTriage) return false;
   if (!project.elevatedModel) return false;
   if (project.autoElevateOnFailure === false) return false;
   if (record.elevated) return false;

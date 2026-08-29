@@ -3,6 +3,7 @@ import { key, type LoopContext } from "./context.ts";
 import {
   getStatusCommentInfo,
   markReady,
+  markTriage,
   refreshHeartbeat,
   refreshHeartbeatIfStale,
   removeAssignee,
@@ -118,6 +119,13 @@ export async function healOrphanedClaims(
         ].join("\n\n"),
       );
       for (const login of issue.assignees ?? []) await removeAssignee(project, issue.number, login);
+      // KNOWN GAP: this path is defined by the *absence* of a `TicketRecord`
+      // (the guard above skips anything we have a record for), and claiming a
+      // triage consumes `fleet:triage` before the record is written — so an
+      // orphaned triage claim leaves no signal anywhere that it was one, and
+      // `fleet:ready` here can requeue an undiagnosed issue as code. Reading
+      // the kind back would need a marker written before the label swap in
+      // `processTicket`; guessing from the issue is not possible.
       await markReady(project, issue.number);
       new Journal(ctx.dataDirPath, project.name, issue.number).append({ type: "fleet", event: "orphaned-claim-released" });
       ctx.state.appendEvent("orphaned-claim-released", {
@@ -171,7 +179,14 @@ export async function releaseStaleClaims(
         ].join("\n\n"),
       );
       for (const login of others) await removeAssignee(project, issue.number, login);
-      await markReady(project, issue.number);
+      // If this daemon has a record of the ticket, it knows which kind was
+      // claimed — and a triage claim consumed its `fleet:triage` label, so
+      // requeuing it as `fleet:ready` would hand a still-undiagnosed issue to a
+      // coding session. With no record (the common case here — the claim was a
+      // peer's) there is no signal to read, and `fleet:ready` stays the
+      // behavior.
+      if (ctx.state.get(project.name, issue.number)?.isTriage) await markTriage(project, issue.number);
+      else await markReady(project, issue.number);
       new Journal(ctx.dataDirPath, project.name, issue.number).append({
         type: "fleet",
         event: "stale-claim-released",

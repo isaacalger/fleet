@@ -18,6 +18,7 @@ const {
   buildReviewFeedbackPrompt,
   dependencyStatus,
   escalateLabelArgs,
+  triageLabelArgs,
   getPrChecks,
   getPrDiff,
   getPrOutcome,
@@ -105,6 +106,24 @@ describe("readyLabelArgs", () => {
 
   it("never removes fleet:ready itself", () => {
     expect(readyLabelArgs(project, 7).filter((a) => a === "fleet:ready")).toEqual(["fleet:ready"]);
+  });
+});
+
+describe("triageLabelArgs", () => {
+  const project = makeProject();
+
+  it("clears every other fleet state label — including fleet:ready — and adds fleet:triage", () => {
+    expect(triageLabelArgs(project, 7)).toEqual([
+      "issue", "edit", "7",
+      "--repo", "acme/alpha",
+      "--remove-label", "fleet:in-progress",
+      "--remove-label", "fleet:needs-input",
+      "--remove-label", "fleet:review",
+      // Unlike `readyLabelArgs`, this one must clear `fleet:ready`: leaving both
+      // on would make the next claim compute `isReady` first and run code.
+      "--remove-label", "fleet:ready",
+      "--add-label", "fleet:triage",
+    ]);
   });
 });
 

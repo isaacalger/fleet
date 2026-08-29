@@ -4,6 +4,7 @@ import {
   FLEET_LABELS,
   PLAN_LABEL,
   PRIORITY_LABELS,
+  TRIAGE_LABEL,
   boardStatusFromLabels,
   priorityOf,
   profileNames,
@@ -546,6 +547,28 @@ export function readyLabelArgs(project: ProjectConfig, issueNumber: number): str
 
 export async function markReady(project: ProjectConfig, issueNumber: number): Promise<void> {
   await run("gh", readyLabelArgs(project, issueNumber));
+}
+
+/**
+ * The triage counterpart of `readyLabelArgs`: put an issue back in the queue as
+ * an *investigation* rather than as work. Claiming a triage consumes
+ * `fleet:triage` (see `processTicket`), so every "requeue this ticket" path
+ * would otherwise hand a still-undiagnosed issue to a coding session. This also
+ * removes `fleet:ready` — the one label `readyLabelArgs` never has to clear —
+ * because leaving both on would make the next claim compute `isReady` first and
+ * run code anyway.
+ */
+export function triageLabelArgs(project: ProjectConfig, issueNumber: number): string[] {
+  const args = ["issue", "edit", String(issueNumber), "--repo", project.githubRepo];
+  for (const label of [FLEET_LABELS.inProgress, FLEET_LABELS.needsInput, FLEET_LABELS.review, FLEET_LABELS.ready]) {
+    args.push("--remove-label", label);
+  }
+  args.push("--add-label", TRIAGE_LABEL);
+  return args;
+}
+
+export async function markTriage(project: ProjectConfig, issueNumber: number): Promise<void> {
+  await run("gh", triageLabelArgs(project, issueNumber));
 }
 
 /**
