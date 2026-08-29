@@ -44,6 +44,8 @@
       "autoElevateOnFailure": true,
       "autoAddressReviews": true,
       "machineReview": true,
+      "triage": true,
+      "triageAutoPromoteThreshold": 80,
       "intakeLint": true,
       "autoMerge": false,
       "approvers": ["j"],

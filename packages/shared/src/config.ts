@@ -51,6 +51,15 @@ export const ProjectConfigSchema = z.object({
   autoElevateOnFailure: z.boolean().default(true),
   autoAddressReviews: z.boolean().default(true),
   machineReview: z.boolean().default(true),
+  /** Enable the triage stage for this project — the Triage panel's Investigate button and `fleet:triage` claiming. */
+  triage: z.boolean().default(false),
+  /**
+   * Whole-number confidence percentage at or above which a completed triage is
+   * auto-promoted to `fleet:ready`. The comparison is `confidence >= threshold`,
+   * so 0 promotes everything and 101 — above any reportable confidence — never
+   * promotes, leaving triage as a pure spec-writing step.
+   */
+  triageAutoPromoteThreshold: z.number().int().min(0).max(101).default(80),
   /**
    * Deterministic pre-claim gate: a `fleet:ready` issue body must contain a
    * problem/acceptance-criteria/verification section (problem only for
