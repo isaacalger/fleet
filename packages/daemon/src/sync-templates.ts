@@ -8,9 +8,13 @@ import { log, logError } from "./log.ts";
 const TEMPLATES_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..", "templates");
 const SKILL_TEMPLATE_PATH = join(TEMPLATES_DIR, "fleet-backlog", "SKILL.md");
 const DEBUGGING_SKILL_TEMPLATE_PATH = join(TEMPLATES_DIR, "systematic-debugging", "SKILL.md");
-const SKILL_TEMPLATES: Array<{ templatePath: string; destSubdir: string }> = [
+// Files SKILL.md itself links to as bare siblings — kept as an explicit list
+// (rather than copying the whole template directory) so unreferenced extras
+// in the upstream skill folder never get vendored by accident.
+const DEBUGGING_SKILL_REFERENCED_FILES = ["root-cause-tracing.md", "defense-in-depth.md", "condition-based-waiting.md"];
+const SKILL_TEMPLATES: Array<{ templatePath: string; destSubdir: string; extraFiles?: string[] }> = [
   { templatePath: SKILL_TEMPLATE_PATH, destSubdir: "fleet-backlog" },
-  { templatePath: DEBUGGING_SKILL_TEMPLATE_PATH, destSubdir: "systematic-debugging" },
+  { templatePath: DEBUGGING_SKILL_TEMPLATE_PATH, destSubdir: "systematic-debugging", extraFiles: DEBUGGING_SKILL_REFERENCED_FILES },
 ];
 const MCP_TEMPLATE_PATH = join(TEMPLATES_DIR, "mcp.json.example");
 
@@ -203,13 +207,23 @@ function pruneStaleIssueForms(destDir: string, keep: Set<string>): string[] {
 }
 
 function syncSkills(project: ProjectConfig): string[] {
-  return SKILL_TEMPLATES.map(({ templatePath, destSubdir }) => {
+  const written: string[] = [];
+  for (const { templatePath, destSubdir, extraFiles } of SKILL_TEMPLATES) {
     const skillTemplate = readFileSync(templatePath, "utf8");
-    const destPath = join(project.repoPath, ".claude", "skills", destSubdir, "SKILL.md");
-    mkdirSync(dirname(destPath), { recursive: true });
+    const destDir = join(project.repoPath, ".claude", "skills", destSubdir);
+    const destPath = join(destDir, "SKILL.md");
+    mkdirSync(destDir, { recursive: true });
     writeFileSync(destPath, skillTemplate);
-    return destPath;
-  });
+    written.push(destPath);
+
+    for (const fileName of extraFiles ?? []) {
+      const extraContent = readFileSync(join(dirname(templatePath), fileName), "utf8");
+      const extraDestPath = join(destDir, fileName);
+      writeFileSync(extraDestPath, extraContent);
+      written.push(extraDestPath);
+    }
+  }
+  return written;
 }
 
 function syncIssueForms(project: ProjectConfig): string[] {

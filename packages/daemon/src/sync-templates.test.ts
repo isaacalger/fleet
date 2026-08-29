@@ -112,6 +112,40 @@ describe("syncTemplates", () => {
     expect(existsSync(join(repoPath, ".claude", "skills", "systematic-debugging", "SKILL.md"))).toBe(true);
   });
 
+  it("stamps the files systematic-debugging's SKILL.md references, alongside it", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "fleet-sync-"));
+    repoDirs.push(repoPath);
+
+    await syncTemplates([makeProject({ repoPath })]);
+
+    const destDir = join(repoPath, ".claude", "skills", "systematic-debugging");
+    for (const fileName of ["root-cause-tracing.md", "defense-in-depth.md", "condition-based-waiting.md"]) {
+      expect(existsSync(join(destDir, fileName)), fileName).toBe(true);
+    }
+  });
+
+  it("stamps every file the vendored systematic-debugging SKILL.md links to — guards against a future edit adding an un-vendored reference", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "fleet-sync-"));
+    repoDirs.push(repoPath);
+
+    await syncTemplates([makeProject({ repoPath })]);
+
+    const destDir = join(repoPath, ".claude", "skills", "systematic-debugging");
+    const skillMd = readFileSync(join(destDir, "SKILL.md"), "utf8");
+
+    // Bare relative markdown-file references, e.g. `root-cause-tracing.md` or
+    // [text](condition-based-waiting.md) — not http(s) links, not directories.
+    const referenced = new Set<string>();
+    for (const match of skillMd.matchAll(/(?:`|\()([a-zA-Z0-9_-]+\.md)(?:`|\))/g)) {
+      referenced.add(match[1]!);
+    }
+    expect(referenced.size).toBeGreaterThan(0);
+
+    for (const fileName of referenced) {
+      expect(existsSync(join(destDir, fileName)), `${fileName} referenced by SKILL.md but not stamped`).toBe(true);
+    }
+  });
+
   it("adds a task form per non-default fleet.yaml profile, in fleet.yaml's declared order", async () => {
     const repoPath = mkdtempSync(join(tmpdir(), "fleet-sync-"));
     repoDirs.push(repoPath);
