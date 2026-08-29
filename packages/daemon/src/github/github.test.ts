@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ALL_FLEET_LABELS, TRIAGE_LABEL } from "@fleet/shared";
+import { ALL_FLEET_LABELS, CONFIDENCE_OVERRIDE_LABEL, TRIAGE_LABEL } from "@fleet/shared";
 import { makeProject } from "../test-support.ts";
 
 vi.mock("./exec.ts", async (importActual) => ({
@@ -36,6 +36,7 @@ const {
   parseTicketTimeoutMinutes,
   priorityRank,
   readyLabelArgs,
+  removeLabel,
   refreshHeartbeat,
   refreshHeartbeatIfStale,
   toBoardTicket,
@@ -1042,5 +1043,28 @@ describe("addLabel", () => {
       'could not create label "fleet:triage" in acme/alpha — run `pnpm daemon init-labels` to create fleet\'s labels in this repo',
     );
     expect(run).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("removeLabel", () => {
+  const run = vi.mocked(exec.run);
+  beforeEach(() => run.mockReset());
+
+  it("shells out to gh issue edit with --remove-label", async () => {
+    run.mockResolvedValue({ stdout: "", stderr: "" });
+
+    await removeLabel(project, 42, CONFIDENCE_OVERRIDE_LABEL);
+
+    expect(run.mock.calls).toEqual([["gh", [
+      "issue", "edit", "42",
+      "--repo", "acme/alpha",
+      "--remove-label", CONFIDENCE_OVERRIDE_LABEL,
+    ]]]);
+  });
+
+  it("propagates a failure so callers can fail closed", async () => {
+    run.mockRejectedValueOnce(new Error("gh exploded"));
+
+    await expect(removeLabel(project, 42, CONFIDENCE_OVERRIDE_LABEL)).rejects.toThrow("gh exploded");
   });
 });

@@ -552,14 +552,23 @@ export async function addLabel(project: ProjectConfig, issueNumber: number, labe
   }
 }
 
-export async function swapLabel(project: ProjectConfig, issueNumber: number, from: string, to: string): Promise<void> {
-  // Via `addLabel` so the add half self-heals a label the repo predates too.
-  await addLabel(project, issueNumber, to);
+/**
+ * Remove a label. Unlike `addLabel` there is nothing to self-heal — a label
+ * that doesn't exist can't be attached — so failures propagate, which is what
+ * lets the confidence gate fail closed when it can't consume an override.
+ */
+export async function removeLabel(project: ProjectConfig, issueNumber: number, label: string): Promise<void> {
   await run("gh", [
     "issue", "edit", String(issueNumber),
     "--repo", project.githubRepo,
-    "--remove-label", from,
+    "--remove-label", label,
   ]);
+}
+
+export async function swapLabel(project: ProjectConfig, issueNumber: number, from: string, to: string): Promise<void> {
+  // Via `addLabel` so the add half self-heals a label the repo predates too.
+  await addLabel(project, issueNumber, to);
+  await removeLabel(project, issueNumber, from);
 }
 
 /**
