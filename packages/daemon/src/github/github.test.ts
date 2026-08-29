@@ -23,6 +23,8 @@ const {
   getPrOutcome,
   getStatusCommentInfo,
   issueNumberFromUrl,
+  listFleetIssues,
+  listNonFleetIssues,
   mergePullRequest,
   parseChildTaskList,
   parseDependsOn,
@@ -56,6 +58,34 @@ describe("priorityRank", () => {
 
   it("uses the highest priority when several are present", () => {
     expect(priorityRank(["fleet:p3", "fleet:p1"])).toBe(0);
+  });
+});
+
+describe("listNonFleetIssues", () => {
+  const RAW = [
+    { number: 1, title: "fleet one", body: "", labels: [{ name: "fleet:ready" }], url: "u1", author: { login: "a" }, assignees: [] },
+    { number: 2, title: "plain bug", body: "b", labels: [{ name: "bug" }], url: "u2", author: { login: "a" }, assignees: [] },
+    { number: 3, title: "unlabeled", body: "", labels: [], url: "u3", author: { login: "a" }, assignees: [] },
+  ];
+
+  it("returns only issues with no fleet:* label", async () => {
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const issues = await listNonFleetIssues(makeProject());
+    expect(issues.map((i) => i.number)).toEqual([3, 2]);
+  });
+
+  it("maps the same shape listFleetIssues does", async () => {
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const [first] = await listNonFleetIssues(makeProject());
+    expect(first).toMatchObject({ number: 3, title: "unlabeled", body: "", labels: [], url: "u3", author: "a", assignees: [] });
+  });
+
+  it("is the exact complement of listFleetIssues over the same fetch", async () => {
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const fleet = await listFleetIssues(makeProject());
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const nonFleet = await listNonFleetIssues(makeProject());
+    expect(fleet.length + nonFleet.length).toBe(RAW.length);
   });
 });
 

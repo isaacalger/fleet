@@ -77,7 +77,8 @@ export function priorityRank(labels: string[]): number {
   return index === -1 ? PRIORITY_LABELS.length : index;
 }
 
-export async function listFleetIssues(project: ProjectConfig): Promise<FleetIssue[]> {
+/** Every open issue, mapped to `FleetIssue` shape and unfiltered. One `gh` call, shared by both views below. */
+async function listOpenIssues(project: ProjectConfig): Promise<FleetIssue[]> {
   const issues = await runJson<GhIssueJson[]>("gh", [
     "issue", "list",
     "--repo", project.githubRepo,
@@ -88,18 +89,30 @@ export async function listFleetIssues(project: ProjectConfig): Promise<FleetIssu
   if (issues.length >= 1000) {
     log("github", `WARNING: ${project.githubRepo} returned 1000 open issues — the listing may be truncated and older fleet tickets invisible`);
   }
+  return issues.map((issue) => ({
+    number: issue.number,
+    title: issue.title,
+    body: issue.body ?? "",
+    labels: issue.labels.map((l) => l.name),
+    url: issue.url,
+    author: issue.author?.login ?? "",
+    assignees: issue.assignees.map((a) => a.login),
+  }));
+}
+
+const hasFleetLabel = (issue: FleetIssue): boolean => issue.labels.some((l) => l.startsWith("fleet:"));
+
+export async function listFleetIssues(project: ProjectConfig): Promise<FleetIssue[]> {
+  const issues = await listOpenIssues(project);
   return issues
-    .map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body ?? "",
-      labels: issue.labels.map((l) => l.name),
-      url: issue.url,
-      author: issue.author?.login ?? "",
-      assignees: issue.assignees.map((a) => a.login),
-    }))
-    .filter((issue) => issue.labels.some((l) => l.startsWith("fleet:")))
+    .filter(hasFleetLabel)
     .sort((a, b) => priorityRank(a.labels) - priorityRank(b.labels) || a.number - b.number);
+}
+
+/** Open issues carrying no `fleet:*` label — triage candidates, invisible to the board. */
+export async function listNonFleetIssues(project: ProjectConfig): Promise<FleetIssue[]> {
+  const issues = await listOpenIssues(project);
+  return issues.filter((issue) => !hasFleetLabel(issue)).sort((a, b) => b.number - a.number);
 }
 
 export function toBoardTicket(project: ProjectConfig, issue: FleetIssue, blockedBy: number[] = []): BoardTicket | null {
