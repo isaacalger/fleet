@@ -489,20 +489,71 @@ export function getPushCollaborators(project: ProjectConfig): Promise<Set<string
  * issue with *both* fleet labels (visible on the board, fixable by a human)
  * instead of neither (invisible to every recovery path).
  */
+/**
+ * True only for gh's "the repo has no such label" failure for *this* label —
+ * gh reports it as `'<label>' not found` inside the update error. Deliberately
+ * narrow: a permissions failure or a network blip must not be mistaken for a
+ * missing label and trigger label creation.
+ */
+function isLabelNotFoundError(err: unknown, label: string): boolean {
+  return err instanceof Error && err.message.includes(`'${label}' not found`);
+}
+
+/**
+ * Creates one known fleet label in the repo. Idempotent via `--force`. Narrow
+ * counterpart to `ensureLabels`, which also fetches and reads fleet.yaml and is
+ * therefore only appropriate for the one-off `init-labels` command.
+ */
+async function createFleetLabel(project: ProjectConfig, name: string): Promise<void> {
+  const spec = ALL_FLEET_LABELS.find((l) => l.name === name);
+  if (!spec) {
+    throw new Error(
+      `could not create label "${name}" in ${project.githubRepo} — it is not a known fleet label; `
+      + "run `pnpm daemon init-labels` to create fleet's labels in this repo",
+    );
+  }
+  try {
+    await run("gh", [
+      "label", "create", spec.name,
+      "--repo", project.githubRepo,
+      "--color", spec.color,
+      "--description", spec.description,
+      "--force",
+    ]);
+  } catch (err) {
+    throw new Error(
+      `could not create label "${name}" in ${project.githubRepo} — run \`pnpm daemon init-labels\` `
+      + `to create fleet's labels in this repo (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+}
+
+/**
+ * Self-heals the "label added in a newer fleet release, repo registered before
+ * it" case: any label in `ALL_FLEET_LABELS` that the repo is missing is created
+ * on demand and the edit retried exactly once. No loop — a second not-found
+ * means something else is wrong (permissions, a renamed repo), and quietly
+ * retrying would hide it.
+ */
 export async function addLabel(project: ProjectConfig, issueNumber: number, label: string): Promise<void> {
-  await run("gh", [
+  const args = [
     "issue", "edit", String(issueNumber),
     "--repo", project.githubRepo,
     "--add-label", label,
-  ]);
+  ];
+  try {
+    await run("gh", args);
+  } catch (err) {
+    if (!isLabelNotFoundError(err, label)) throw err;
+    log("github", `${project.githubRepo}: label "${label}" is missing — creating it and retrying`);
+    await createFleetLabel(project, label);
+    await run("gh", args);
+  }
 }
 
 export async function swapLabel(project: ProjectConfig, issueNumber: number, from: string, to: string): Promise<void> {
-  await run("gh", [
-    "issue", "edit", String(issueNumber),
-    "--repo", project.githubRepo,
-    "--add-label", to,
-  ]);
+  // Via `addLabel` so the add half self-heals a label the repo predates too.
+  await addLabel(project, issueNumber, to);
   await run("gh", [
     "issue", "edit", String(issueNumber),
     "--repo", project.githubRepo,

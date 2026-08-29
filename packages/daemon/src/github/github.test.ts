@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ALL_FLEET_LABELS, TRIAGE_LABEL } from "@fleet/shared";
 import { makeProject } from "../test-support.ts";
 
 vi.mock("./exec.ts", async (importActual) => ({
@@ -10,6 +11,7 @@ vi.mock("./exec.ts", async (importActual) => ({
 
 const exec = await import("./exec.ts");
 const {
+  addLabel,
   bodyWithChildTaskList,
   bodyWithDependsOn,
   bodyWithPartOf,
@@ -930,5 +932,101 @@ describe("getPrOutcome", () => {
     const outcome = await getPrOutcome(project, "https://github.com/acme/alpha/pull/7");
     expect(outcome.reviewRounds).toBe(2);
     expect(outcome.reviewCommentCount).toBe(1);
+  });
+});
+
+describe("addLabel", () => {
+  const run = vi.mocked(exec.run);
+  // `vi.clearAllMocks()` keeps queued `*Once` implementations, so a test that
+  // throws before consuming its queue would leak into the next one.
+  beforeEach(() => run.mockReset());
+  const editArgs = (label: string) => [
+    "issue", "edit", "4",
+    "--repo", "acme/alpha",
+    "--add-label", label,
+  ];
+  // The real shape `run` throws on a missing label, verbatim from gh.
+  const notFound = (label: string) =>
+    new Error(
+      `gh issue edit 4 --repo acme/alpha --add-label ${label} failed (exit 1): `
+      + `failed to update https://github.com/acme/alpha/issues/4: '${label}' not found\nfailed to update 1 issue`,
+    );
+
+  it("issues exactly one gh call and creates nothing when the label already exists", async () => {
+    run.mockResolvedValue({ stdout: "", stderr: "" });
+    await addLabel(project, 4, TRIAGE_LABEL);
+    expect(run.mock.calls).toEqual([["gh", editArgs(TRIAGE_LABEL)]]);
+  });
+
+  it("creates the missing label with its ALL_FLEET_LABELS color/description, then retries the identical edit", async () => {
+    run
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL))
+      .mockResolvedValue({ stdout: "", stderr: "" });
+
+    await addLabel(project, 4, TRIAGE_LABEL);
+
+    const spec = ALL_FLEET_LABELS.find((l) => l.name === TRIAGE_LABEL)!;
+    expect(run.mock.calls).toEqual([
+      ["gh", editArgs(TRIAGE_LABEL)],
+      ["gh", [
+        "label", "create", TRIAGE_LABEL,
+        "--repo", "acme/alpha",
+        "--color", spec.color,
+        "--description", spec.description,
+        "--force",
+      ]],
+      ["gh", editArgs(TRIAGE_LABEL)],
+    ]);
+  });
+
+  it("retries exactly once — a second not-found propagates with no third attempt", async () => {
+    run
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL))
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }) // label create
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(/'fleet:triage' not found/);
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it("propagates a non-not-found failure immediately without attempting label creation", async () => {
+    run.mockRejectedValueOnce(new Error(
+      "gh issue edit 4 --repo acme/alpha --add-label fleet:triage failed (exit 1): "
+      + "HTTP 403: Resource not accessible by integration",
+    ));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(/403/);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]).toEqual(["gh", editArgs(TRIAGE_LABEL)]);
+  });
+
+  it("does not treat an unrelated label's not-found message as this label's", async () => {
+    run.mockRejectedValueOnce(new Error(
+      "gh issue edit 4 --repo acme/alpha --add-label fleet:triage failed (exit 1): 'some-other-label' not found",
+    ));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(/some-other-label/);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("raises an actionable init-labels error for an unknown label instead of inventing a color", async () => {
+    run.mockRejectedValueOnce(notFound("fleet:bogus"));
+
+    await expect(addLabel(project, 4, "fleet:bogus")).rejects.toThrow(
+      'could not create label "fleet:bogus" in acme/alpha — it is not a known fleet label',
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]).toEqual(["gh", editArgs("fleet:bogus")]);
+  });
+
+  it("wraps a failed label creation in an actionable init-labels error", async () => {
+    run
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL))
+      .mockRejectedValueOnce(new Error("gh label create failed (exit 1): HTTP 403"));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(
+      'could not create label "fleet:triage" in acme/alpha — run `pnpm daemon init-labels` to create fleet\'s labels in this repo',
+    );
+    expect(run).toHaveBeenCalledTimes(2);
   });
 });
