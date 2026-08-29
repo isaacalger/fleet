@@ -1,6 +1,6 @@
 import type { FleetConfig, PlanResult, ProjectConfig, TicketRecord } from "@fleet/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeApprovals, makeCtx, makeFleetConfig, makeProject, makeRecord, makeTempState } from "../test-support.ts";
+import { TEST_CONFIDENCE, makeApprovals, makeCtx, makeFleetConfig, makeProject, makeRecord, makeTempState } from "../test-support.ts";
 import { readJournalTail } from "../store/journal.ts";
 import { finishPlanned, PostCompletionError, resolveDependsOnIndex } from "./finish.ts";
 import { FleetLoop } from "./loop.ts";
@@ -72,7 +72,7 @@ function makeLoop(seed?: TicketRecord, configPatch: Partial<FleetConfig> = {}) {
   return { loop, state, internals };
 }
 
-const completedResult = { prTitle: "Fix the thing", prBody: "It's fixed.", filesChanged: ["src/a.ts"], confidence: 90 };
+const completedResult = { prTitle: "Fix the thing", prBody: "It's fixed.", filesChanged: ["src/a.ts"], confidence: TEST_CONFIDENCE };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -105,6 +105,7 @@ describe("finishCompleted — status comment error policy", () => {
     await internals.finishCompleted(project, issue, "/tmp/wt/7", "fleet/7", "did the thing", completedResult);
 
     expect(github.upsertStatusComment).toHaveBeenCalledOnce();
+    expect(vi.mocked(github.upsertStatusComment).mock.calls[0]?.[2]).toContain(`confidence: ${TEST_CONFIDENCE}%`);
     expect(github.swapLabel).toHaveBeenCalledWith(project, 7, "fleet:in-progress", "fleet:review");
     expect(state.get("alpha", 7)?.status).toBe("review");
   });
@@ -291,7 +292,7 @@ describe("finishPlanned — dependsOnIndex translation", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: 90,
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it", dependsOnIndex: [0] },
@@ -311,7 +312,7 @@ describe("finishPlanned — dependsOnIndex translation", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: 90,
+      confidence: TEST_CONFIDENCE,
       tickets: [{ title: "first", body: "first body", dependsOnIndex: [0, 1, 5] }],
     };
 
@@ -346,7 +347,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: 90,
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it" },
@@ -366,7 +367,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: 90,
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it", dependsOnIndex: [0] },
@@ -388,7 +389,7 @@ describe("finishPlanned — epic linkage", () => {
     });
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: 90, tickets: [{ title: "a", body: "b" }] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [{ title: "a", body: "b" }] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -401,7 +402,7 @@ describe("finishPlanned — epic linkage", () => {
     vi.mocked(github.findChildIssues).mockResolvedValue([41, 42]);
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: 90, tickets: [{ title: "a", body: "b" }] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [{ title: "a", body: "b" }] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -412,7 +413,7 @@ describe("finishPlanned — epic linkage", () => {
     vi.mocked(github.getIssue).mockResolvedValue(undefined);
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: 90, tickets: [{ title: "a", body: "b" }] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [{ title: "a", body: "b" }] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -427,7 +428,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: 90,
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it" },
@@ -446,7 +447,7 @@ describe("finishPlanned — epic linkage", () => {
   it("does not touch the epic body when no children were filed", async () => {
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: 90, tickets: [] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -460,7 +461,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: 90,
+      confidence: TEST_CONFIDENCE,
       tickets: [{ title: "add the schema field", body: "add it" }],
     };
 

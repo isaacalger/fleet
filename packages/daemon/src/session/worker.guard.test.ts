@@ -4,6 +4,7 @@ import {
   FORBIDDEN_BASH_REASON,
   FORBIDDEN_COMMIT_REASON,
   PLAN_OUTPUT_SCHEMA,
+  TRIAGE_OUTPUT_SCHEMA,
   WORKER_OUTPUT_SCHEMA,
   denyForbiddenBash,
   denyForbiddenPlanBash,
@@ -11,6 +12,7 @@ import {
   isForbiddenPlanBashCommand,
   makeJournaledBashGuard,
 } from "./worker.ts";
+import { MACHINE_REVIEW_OUTPUT_SCHEMA, PLAN_REVIEW_OUTPUT_SCHEMA } from "./review.ts";
 
 function fakeJournal() {
   return { append: vi.fn() } as unknown as Journal;
@@ -191,35 +193,33 @@ describe("makeJournaledBashGuard", () => {
   });
 });
 
-describe("PLAN_OUTPUT_SCHEMA", () => {
+describe.each([
+  ["WORKER_OUTPUT_SCHEMA", WORKER_OUTPUT_SCHEMA, ["status", "summary", "filesChanged", "prTitle", "prBody", "blockedReason", "confidence"]],
+  ["PLAN_OUTPUT_SCHEMA", PLAN_OUTPUT_SCHEMA, ["status", "summary", "tickets", "blockedReason", "confidence"]],
+  ["TRIAGE_OUTPUT_SCHEMA", TRIAGE_OUTPUT_SCHEMA, ["status", "summary", "rootCause", "evidence", "spec", "confidence"]],
+  ["MACHINE_REVIEW_OUTPUT_SCHEMA", MACHINE_REVIEW_OUTPUT_SCHEMA, ["verdict", "summary", "findings", "confidence"]],
+  ["PLAN_REVIEW_OUTPUT_SCHEMA", PLAN_REVIEW_OUTPUT_SCHEMA, ["verdict", "summary", "findings", "confidence"]],
+] as [string, Record<string, unknown>, string[]][])("%s", (_name, schema, expectedProperties) => {
   it("keeps the converted zod schema's properties", () => {
-    const properties = PLAN_OUTPUT_SCHEMA.properties as Record<string, unknown>;
-    expect(Object.keys(properties)).toEqual(
-      expect.arrayContaining(["status", "summary", "tickets", "blockedReason", "confidence"]),
-    );
+    const properties = schema.properties as Record<string, unknown>;
+
+    expect(Object.keys(properties)).toEqual(expect.arrayContaining(expectedProperties));
+  });
+
+  it("advertises confidence as an integer 0-100, which is only representable while the schema stays transform-free", () => {
+    const properties = schema.properties as Record<string, unknown>;
+
+    expect(properties.confidence).toMatchObject({ type: "integer", minimum: 0, maximum: 100 });
   });
 
   it("carries no top-level combinator, which the API rejects in a tool input_schema", () => {
-    expect(PLAN_OUTPUT_SCHEMA.allOf).toBeUndefined();
-    expect(PLAN_OUTPUT_SCHEMA.anyOf).toBeUndefined();
-    expect(PLAN_OUTPUT_SCHEMA.oneOf).toBeUndefined();
+    expect(schema.allOf).toBeUndefined();
+    expect(schema.anyOf).toBeUndefined();
+    expect(schema.oneOf).toBeUndefined();
   });
 });
 
 describe("WORKER_OUTPUT_SCHEMA", () => {
-  it("keeps the converted zod schema's properties", () => {
-    const properties = WORKER_OUTPUT_SCHEMA.properties as Record<string, unknown>;
-    expect(Object.keys(properties)).toEqual(
-      expect.arrayContaining(["status", "summary", "filesChanged", "prTitle", "prBody", "blockedReason", "confidence"]),
-    );
-  });
-
-  it("carries no top-level combinator, which the API rejects in a tool input_schema", () => {
-    expect(WORKER_OUTPUT_SCHEMA.allOf).toBeUndefined();
-    expect(WORKER_OUTPUT_SCHEMA.anyOf).toBeUndefined();
-    expect(WORKER_OUTPUT_SCHEMA.oneOf).toBeUndefined();
-  });
-
   it("requires only the fields every result carries, whatever the status", () => {
     expect(WORKER_OUTPUT_SCHEMA.required).toEqual(
       expect.arrayContaining(["status", "summary", "filesChanged", "confidence"]),

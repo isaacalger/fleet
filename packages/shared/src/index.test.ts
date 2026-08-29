@@ -374,10 +374,13 @@ describe("ConfidenceScoreSchema", () => {
 });
 
 describe("normalizeLegacyConfidence", () => {
+  /** The shim returns `unknown` — it can't promise the output type of a value it was handed as `unknown`. */
+  const scoreOf = (raw: unknown) => (normalizeLegacyConfidence(raw) as { confidence: unknown }).confidence;
+
   it("maps each legacy string onto the 0-100 scale", () => {
-    expect(normalizeLegacyConfidence({ confidence: "low" }).confidence).toBe(30);
-    expect(normalizeLegacyConfidence({ confidence: "medium" }).confidence).toBe(60);
-    expect(normalizeLegacyConfidence({ confidence: "high" }).confidence).toBe(90);
+    expect(scoreOf({ confidence: "low" })).toBe(30);
+    expect(scoreOf({ confidence: "medium" })).toBe(60);
+    expect(scoreOf({ confidence: "high" })).toBe(90);
   });
 
   it("passes a numeric confidence through untouched", () => {

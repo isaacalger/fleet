@@ -19,10 +19,13 @@ export const ConfidenceScoreSchema = z.number().int().min(0).max(100);
  * unparseable result is an errored turn that burns the ticket's once-only
  * auto-elevate on a retry that cannot succeed.
  *
+ * Applied uniformly at every result parse site, including triage, which never
+ * had string confidence — uniformity means the eventual deletion is one grep.
+ *
  * Remove one full ticket-lifetime after deploy.
  */
-export function normalizeLegacyConfidence<T>(raw: T): T {
-  if (raw === null || typeof raw !== "object" || !("confidence" in raw)) return raw;
+export function normalizeLegacyConfidence(raw: unknown): unknown {
+  if (raw === null || typeof raw !== "object" || !Object.hasOwn(raw, "confidence")) return raw;
   const { confidence } = raw as { confidence: unknown };
   if (confidence !== "low" && confidence !== "medium" && confidence !== "high") return raw;
   const score = confidence === "high" ? 90 : confidence === "medium" ? 60 : 30;
@@ -97,7 +100,7 @@ export const TriageResultSchema = z.object({
   summary: z.string().describe("2-5 sentence plain-language summary of the investigation, written for the issue's status comment"),
   rootCause: z.string().describe("The underlying defect you identified — what is actually wrong in the code, not the symptom the reporter observed. Required even at low confidence; say what you believe and let the confidence score carry your uncertainty."),
   evidence: z.array(z.string()).default([]).describe("Repo-relative `file:line` references that support the diagnosis, e.g. `src/storage.js:8`"),
-  confidence: z.number().int().min(0).max(100).describe("Whole-number percentage (0-100) expressing how confident you are that rootCause is correct and the spec below is implementable as written. Be honest and calibrated: 90+ means you traced the defect to specific lines and understand the fix; below 50 means you are guessing. This number gates whether the spec is auto-promoted to a coding worker without human review, so overstating it causes real harm."),
+  confidence: ConfidenceScoreSchema.describe("Whole-number percentage (0-100) expressing how confident you are that rootCause is correct and the spec below is implementable as written. Be honest and calibrated: 90+ means you traced the defect to specific lines and understand the fix; below 50 means you are guessing. This number gates whether the spec is auto-promoted to a coding worker without human review, so overstating it causes real harm."),
   spec: z.object({
     problem: z.string().describe("Markdown for the issue body's `## Problem` section — a self-contained statement of the defect"),
     acceptanceCriteria: z.string().describe("Markdown for the `## Acceptance criteria` section — checkable conditions, one per line"),
