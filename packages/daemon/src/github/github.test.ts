@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ALL_FLEET_LABELS, CONFIDENCE_OVERRIDE_LABEL, TRIAGE_LABEL } from "@fleet/shared";
 import { makeProject } from "../test-support.ts";
 
 vi.mock("./exec.ts", async (importActual) => ({
@@ -10,6 +11,7 @@ vi.mock("./exec.ts", async (importActual) => ({
 
 const exec = await import("./exec.ts");
 const {
+  addLabel,
   bodyWithChildTaskList,
   bodyWithDependsOn,
   bodyWithPartOf,
@@ -18,11 +20,14 @@ const {
   buildReviewFeedbackPrompt,
   dependencyStatus,
   escalateLabelArgs,
+  triageLabelArgs,
   getPrChecks,
   getPrDiff,
   getPrOutcome,
   getStatusCommentInfo,
   issueNumberFromUrl,
+  listFleetIssues,
+  listNonFleetIssues,
   mergePullRequest,
   parseChildTaskList,
   parseDependsOn,
@@ -31,6 +36,8 @@ const {
   parseTicketTimeoutMinutes,
   priorityRank,
   readyLabelArgs,
+  removeLabel,
+  swapLabel,
   refreshHeartbeat,
   refreshHeartbeatIfStale,
   toBoardTicket,
@@ -59,6 +66,34 @@ describe("priorityRank", () => {
   });
 });
 
+describe("listNonFleetIssues", () => {
+  const RAW = [
+    { number: 1, title: "fleet one", body: "", labels: [{ name: "fleet:ready" }], url: "u1", author: { login: "a" }, assignees: [] },
+    { number: 2, title: "plain bug", body: "b", labels: [{ name: "bug" }], url: "u2", author: { login: "a" }, assignees: [] },
+    { number: 3, title: "unlabeled", body: "", labels: [], url: "u3", author: { login: "a" }, assignees: [] },
+  ];
+
+  it("returns only issues with no fleet:* label", async () => {
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const issues = await listNonFleetIssues(makeProject());
+    expect(issues.map((i) => i.number)).toEqual([3, 2]);
+  });
+
+  it("maps the same shape listFleetIssues does", async () => {
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const [first] = await listNonFleetIssues(makeProject());
+    expect(first).toMatchObject({ number: 3, title: "unlabeled", body: "", labels: [], url: "u3", author: "a", assignees: [] });
+  });
+
+  it("is the exact complement of listFleetIssues over the same fetch", async () => {
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const fleet = await listFleetIssues(makeProject());
+    vi.mocked(exec.runJson).mockResolvedValue(RAW);
+    const nonFleet = await listNonFleetIssues(makeProject());
+    expect(fleet.length + nonFleet.length).toBe(RAW.length);
+  });
+});
+
 describe("readyLabelArgs", () => {
   const project = makeProject();
 
@@ -75,6 +110,24 @@ describe("readyLabelArgs", () => {
 
   it("never removes fleet:ready itself", () => {
     expect(readyLabelArgs(project, 7).filter((a) => a === "fleet:ready")).toEqual(["fleet:ready"]);
+  });
+});
+
+describe("triageLabelArgs", () => {
+  const project = makeProject();
+
+  it("clears every other fleet state label — including fleet:ready — and adds fleet:triage", () => {
+    expect(triageLabelArgs(project, 7)).toEqual([
+      "issue", "edit", "7",
+      "--repo", "acme/alpha",
+      "--remove-label", "fleet:in-progress",
+      "--remove-label", "fleet:needs-input",
+      "--remove-label", "fleet:review",
+      // Unlike `readyLabelArgs`, this one must clear `fleet:ready`: leaving both
+      // on would make the next claim compute `isReady` first and run code.
+      "--remove-label", "fleet:ready",
+      "--add-label", "fleet:triage",
+    ]);
   });
 });
 
@@ -394,6 +447,20 @@ describe("toBoardTicket — epic linkage", () => {
     const ticket = toBoardTicket(project, fleetIssue());
     expect(ticket?.type).toBeNull();
   });
+
+  it("projects a fleet:triage issue onto the ready column, flagged isTriage", () => {
+    const ticket = toBoardTicket(project, fleetIssue({ labels: ["bug", "fleet:triage"] }));
+    expect(ticket).not.toBeNull();
+    expect(ticket?.status).toBe("ready");
+    expect(ticket?.isTriage).toBe(true);
+    expect(ticket?.isPlan).toBe(false);
+  });
+
+  it("leaves isTriage false on an ordinary fleet:ready ticket", () => {
+    const ticket = toBoardTicket(project, fleetIssue());
+    expect(ticket?.isTriage).toBe(false);
+    expect(ticket?.status).toBe("ready");
+  });
 });
 
 describe("buildPrFeedback", () => {
@@ -578,6 +645,19 @@ describe("getPrDiff", () => {
       "pr", "view", "https://github.com/acme/alpha/pull/7",
       "--repo", "acme/alpha",
       "--json", "files",
+    ]);
+  });
+});
+
+describe("swapLabel", () => {
+  it("adds the new label before removing the old one, so the issue is never label-less", async () => {
+    vi.mocked(exec.run).mockResolvedValue({ stdout: "", stderr: "" });
+
+    await swapLabel(project, 7, "fleet:in-progress", "fleet:ready");
+
+    expect(vi.mocked(exec.run).mock.calls.map((c) => c[1])).toEqual([
+      ["issue", "edit", "7", "--repo", "acme/alpha", "--add-label", "fleet:ready"],
+      ["issue", "edit", "7", "--repo", "acme/alpha", "--remove-label", "fleet:in-progress"],
     ]);
   });
 });
@@ -881,5 +961,124 @@ describe("getPrOutcome", () => {
     const outcome = await getPrOutcome(project, "https://github.com/acme/alpha/pull/7");
     expect(outcome.reviewRounds).toBe(2);
     expect(outcome.reviewCommentCount).toBe(1);
+  });
+});
+
+describe("addLabel", () => {
+  const run = vi.mocked(exec.run);
+  // `vi.clearAllMocks()` keeps queued `*Once` implementations, so a test that
+  // throws before consuming its queue would leak into the next one.
+  beforeEach(() => run.mockReset());
+  const editArgs = (label: string) => [
+    "issue", "edit", "4",
+    "--repo", "acme/alpha",
+    "--add-label", label,
+  ];
+  // The real shape `run` throws on a missing label, verbatim from gh.
+  const notFound = (label: string) =>
+    new Error(
+      `gh issue edit 4 --repo acme/alpha --add-label ${label} failed (exit 1): `
+      + `failed to update https://github.com/acme/alpha/issues/4: '${label}' not found\nfailed to update 1 issue`,
+    );
+
+  it("issues exactly one gh call and creates nothing when the label already exists", async () => {
+    run.mockResolvedValue({ stdout: "", stderr: "" });
+    await addLabel(project, 4, TRIAGE_LABEL);
+    expect(run.mock.calls).toEqual([["gh", editArgs(TRIAGE_LABEL)]]);
+  });
+
+  it("creates the missing label with its ALL_FLEET_LABELS color/description, then retries the identical edit", async () => {
+    run
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL))
+      .mockResolvedValue({ stdout: "", stderr: "" });
+
+    await addLabel(project, 4, TRIAGE_LABEL);
+
+    const spec = ALL_FLEET_LABELS.find((l) => l.name === TRIAGE_LABEL)!;
+    expect(run.mock.calls).toEqual([
+      ["gh", editArgs(TRIAGE_LABEL)],
+      ["gh", [
+        "label", "create", TRIAGE_LABEL,
+        "--repo", "acme/alpha",
+        "--color", spec.color,
+        "--description", spec.description,
+        "--force",
+      ]],
+      ["gh", editArgs(TRIAGE_LABEL)],
+    ]);
+  });
+
+  it("retries exactly once — a second not-found propagates with no third attempt", async () => {
+    run
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL))
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }) // label create
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(/'fleet:triage' not found/);
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it("propagates a non-not-found failure immediately without attempting label creation", async () => {
+    run.mockRejectedValueOnce(new Error(
+      "gh issue edit 4 --repo acme/alpha --add-label fleet:triage failed (exit 1): "
+      + "HTTP 403: Resource not accessible by integration",
+    ));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(/403/);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]).toEqual(["gh", editArgs(TRIAGE_LABEL)]);
+  });
+
+  it("does not treat an unrelated label's not-found message as this label's", async () => {
+    run.mockRejectedValueOnce(new Error(
+      "gh issue edit 4 --repo acme/alpha --add-label fleet:triage failed (exit 1): 'some-other-label' not found",
+    ));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(/some-other-label/);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("raises an actionable init-labels error for an unknown label instead of inventing a color", async () => {
+    run.mockRejectedValueOnce(notFound("fleet:bogus"));
+
+    await expect(addLabel(project, 4, "fleet:bogus")).rejects.toThrow(
+      'could not create label "fleet:bogus" in acme/alpha — it is not a known fleet label',
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]).toEqual(["gh", editArgs("fleet:bogus")]);
+  });
+
+  it("wraps a failed label creation in an actionable init-labels error", async () => {
+    run
+      .mockRejectedValueOnce(notFound(TRIAGE_LABEL))
+      .mockRejectedValueOnce(new Error("gh label create failed (exit 1): HTTP 403"));
+
+    await expect(addLabel(project, 4, TRIAGE_LABEL)).rejects.toThrow(
+      'could not create label "fleet:triage" in acme/alpha — run `pnpm daemon init-labels` to create fleet\'s labels in this repo',
+    );
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("removeLabel", () => {
+  const run = vi.mocked(exec.run);
+  beforeEach(() => run.mockReset());
+
+  it("shells out to gh issue edit with --remove-label", async () => {
+    run.mockResolvedValue({ stdout: "", stderr: "" });
+
+    await removeLabel(project, 42, CONFIDENCE_OVERRIDE_LABEL);
+
+    expect(run.mock.calls).toEqual([["gh", [
+      "issue", "edit", "42",
+      "--repo", "acme/alpha",
+      "--remove-label", CONFIDENCE_OVERRIDE_LABEL,
+    ]]]);
+  });
+
+  it("propagates a failure so callers can fail closed", async () => {
+    run.mockRejectedValueOnce(new Error("gh exploded"));
+
+    await expect(removeLabel(project, 42, CONFIDENCE_OVERRIDE_LABEL)).rejects.toThrow("gh exploded");
   });
 });

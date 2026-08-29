@@ -4,6 +4,7 @@ import { PRIORITY_LABELS, shortModelName, type BoardTicket, type ClosedTicketRec
 import { formatCost } from "../lib/format.ts";
 import { Badge } from "@/components/ui/badge/index.ts";
 import { Card } from "@/components/ui/card/index.ts";
+import ConfidenceBadge from "./ConfidenceBadge.vue";
 
 const props = defineProps<{
   ticket: BoardTicket;
@@ -26,6 +27,9 @@ const priorityShort = (label: string) => label.replace("fleet:", "");
 const isDone = computed(() => props.ticket.status === "done");
 
 const closedRecord = computed(() => (isDone.value ? (props.ticket.record as ClosedTicketRecord | undefined) : undefined));
+
+/** The last score this ticket ever recorded — absent for every ticket predating pipeline confidence, in which case no badge renders at all. */
+const latestConfidence = computed(() => props.ticket.record?.confidenceHistory?.at(-1));
 
 const blurb = computed(() => {
   const record = props.ticket.record;
@@ -88,6 +92,10 @@ const blurb = computed(() => {
       <Badge v-if="ticket.isPlan" variant="highlight">
         plan
       </Badge>
+      <Badge v-if="ticket.isTriage" variant="warning" title="Bug under read-only triage investigation">
+        triage
+      </Badge>
+      <ConfidenceBadge v-if="latestConfidence" :entry="latestConfidence" />
       <Badge
         v-if="ticket.epicProgress"
         variant="highlight"

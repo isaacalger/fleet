@@ -175,6 +175,39 @@ export async function setProjectDormant(project: string, dormant: boolean): Prom
   );
 }
 
+export interface TriageIssue {
+  number: number;
+  title: string;
+  body: string;
+  labels: string[];
+  author: string;
+  assignees: string[];
+  url: string;
+}
+
+export interface TriageProjectGroup {
+  project: string;
+  issues: TriageIssue[];
+  /** Present only when listing that project's issues failed; the other projects still render. */
+  error?: string;
+}
+
+/** Issues carrying no `fleet:*` label — invisible to the board by design, so this is the only place they surface. */
+export function fetchTriage(): Promise<{ projects: TriageProjectGroup[] }> {
+  return fetch("/api/triage").then((res) => json<{ projects: TriageProjectGroup[] }>(res));
+}
+
+/**
+ * Labels the issue `fleet:triage`; the daemon's ordinary poll loop picks it up
+ * within a cycle. No `board-updated` ping follows, so callers refetch triage
+ * themselves. A 409 means the issue already carries a `fleet:*` label.
+ */
+export async function investigateIssue(project: string, issueNumber: number): Promise<void> {
+  const res = await fetch(`/api/triage/${encodeURIComponent(project)}/${issueNumber}/investigate`, { method: "POST" });
+  if (res.status === 409) throw new Error("Already in the fleet pipeline.");
+  await json(res);
+}
+
 export function fetchApprovals(): Promise<{ approvals: PendingApproval[] }> {
   return fetch("/api/approvals").then((res) => json<{ approvals: PendingApproval[] }>(res));
 }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   MachineReviewResultSchema,
   PlanReviewResultSchema,
+  normalizeLegacyConfidence,
   type Effort,
   type MachineReviewResult,
   type ModelUsageSummary,
@@ -32,7 +33,7 @@ const CONTEXT_SECTION_CHAR_LIMIT = 10_000;
 /** However much added context the prompt carries, the diff keeps at least this much of the shared budget (#199). */
 const DIFF_CHAR_FLOOR = 40_000;
 
-const REVIEWER_CONTRACT = `
+export const REVIEWER_CONTRACT = `
 You are a fleet machine reviewer: a cheap pre-review pass over one ticket's branch diff before it goes to a human.
 
 Contract:
@@ -42,9 +43,10 @@ Contract:
 - Report real defects only: bugs, broken edge cases, unmet requirements from the ticket, dangerous changes (data loss, security), contract violations with surrounding code.
 - Do NOT report style, formatting, or preference nits. "pass" is the normal outcome for competent work.
 - A "findings" verdict sends the worker back for exactly one fix round — use it only when a fix is genuinely needed. Cap findings at the ~8 that matter most; each must name the file (line if known), what is wrong, and why it matters.
+- Report a calibrated confidence percentage (0-100) in this review itself — not in the code, but in your reading of it. If the diff touches code you could not fully trace, say so with a low score; a review below the project's threshold stops the ticket for a human rather than passing it on.
 `.trim();
 
-const PLAN_REVIEWER_CONTRACT = `
+export const PLAN_REVIEWER_CONTRACT = `
 You are a fleet plan reviewer: a cheap pre-review pass over a proposed decomposition of an epic into child tickets, before those children are filed as real GitHub issues.
 
 Contract:
@@ -54,6 +56,7 @@ Contract:
 - Judge the decomposition as a whole: does it cover the epic's stated scope, or is something obviously missing?
 - Do NOT report style, wording, or preference nits. "pass" is the normal outcome for a competent decomposition.
 - A "findings" verdict sends the planner back for exactly one fix round — use it only when a real revision is needed. Cap findings at the ~8 that matter most; each finding should say which child ticket it concerns (by index), or note that it's about the decomposition as a whole.
+- Report a calibrated confidence percentage (0-100) in this review itself — not in the decomposition, but in your reading of it. If the decomposition touches parts of the repo you could not fully trace, say so with a low score; a review below the project's threshold stops the ticket for a human rather than passing it on.
 `.trim();
 
 /**
@@ -397,7 +400,7 @@ export async function runMachineReview(opts: {
     journalSession: "machine-review",
     logLabel: "machine reviewer",
     parseResult: (structuredOutput) => {
-      const parsed = MachineReviewResultSchema.safeParse(structuredOutput);
+      const parsed = MachineReviewResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
       return parsed.success ? parsed.data : undefined;
     },
   });
@@ -421,7 +424,7 @@ export async function runPlanReview(opts: {
     journalSession: "plan-review",
     logLabel: "plan reviewer",
     parseResult: (structuredOutput) => {
-      const parsed = PlanReviewResultSchema.safeParse(structuredOutput);
+      const parsed = PlanReviewResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
       return parsed.success ? parsed.data : undefined;
     },
   });

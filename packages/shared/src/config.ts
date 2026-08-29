@@ -51,6 +51,36 @@ export const ProjectConfigSchema = z.object({
   autoElevateOnFailure: z.boolean().default(true),
   autoAddressReviews: z.boolean().default(true),
   machineReview: z.boolean().default(true),
+  /** Enable the triage stage for this project — the Triage panel's Investigate button and `fleet:triage` claiming. */
+  triage: z.boolean().default(false),
+  /**
+   * Whole-number confidence percentage every scored session must reach to
+   * proceed. Governs all five stages — triage, plan, code, machine review, and
+   * plan review. The comparison is `score >= threshold`, so 0 lets everything
+   * through. A session below it holds the ticket in `fleet:needs-input`; the
+   * operator can carry one stage past the gate with the
+   * `fleet:confidence-overridden` label, which is consumed on use.
+   */
+  confidenceThreshold: z.number().int().min(0).max(100).default(70),
+  /**
+   * Whether a triage that clears `confidenceThreshold` is auto-promoted to
+   * `fleet:ready`. When false, triage always holds for human review and its
+   * score is recorded but not gated. Replaces the old
+   * `triageAutoPromoteThreshold: 101` sentinel.
+   */
+  triageAutoPromote: z.boolean().default(true),
+  /**
+   * REMOVED — kept only to fail loudly. Zod strips unknown keys, so without
+   * this a project that had set 101 (never auto-promote) would silently begin
+   * promoting at the new shared default. Delete once no live config has it.
+   */
+  triageAutoPromoteThreshold: z
+    .unknown()
+    .optional()
+    .refine((v) => v === undefined, {
+      message:
+        "`triageAutoPromoteThreshold` has been removed. Use `confidenceThreshold` (it now governs every stage, triage included), or `triageAutoPromote: false` if you had this set to 101 to never auto-promote.",
+    }),
   /**
    * Deterministic pre-claim gate: a `fleet:ready` issue body must contain a
    * problem/acceptance-criteria/verification section (problem only for

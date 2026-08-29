@@ -13,6 +13,7 @@ function makeTicket(): BoardTicket {
     priority: null,
     type: null,
     isPlan: false,
+    isTriage: false,
   };
 }
 

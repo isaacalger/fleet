@@ -3,6 +3,7 @@ import {
   FLEET_LABELS,
   LIGHT_LABEL,
   PLAN_LABEL,
+  TRIAGE_LABEL,
   type BoardTicket,
   type ProjectConfig,
   type TicketRecord,
@@ -24,6 +25,7 @@ import {
   getIssueAssignees,
   getIssueComments,
   getPushCollaborators,
+  hashBody,
   listFleetIssues,
   listIssueStates,
   parseChildTaskList,
@@ -88,10 +90,17 @@ export function selectEligibleReady(
     getRecord: (issueNumber: number) => TicketRecord | undefined;
     projectName: string;
     myLogin: string;
+    /** `project.triage` — when true, a `fleet:triage` issue is claimable without ever carrying `fleet:ready`. */
+    triageEnabled?: boolean;
   },
 ): ReadyIssue[] {
   return issues.filter((issue) => {
-    if (!issue.labels.includes(FLEET_LABELS.ready)) return false;
+    const isReady = issue.labels.includes(FLEET_LABELS.ready);
+    // A promoted triage comes back as `fleet:ready` (with `fleet:triage` still
+    // on it), so `fleet:ready` deliberately wins: the second pass is a code
+    // claim, not a re-investigation of the ticket triage just wrote.
+    const isTriage = !isReady && opts.triageEnabled === true && issue.labels.includes(TRIAGE_LABEL);
+    if (!isReady && !isTriage) return false;
     if (opts.isRunning(issue.number)) return false;
 
     const others = (issue.assignees ?? []).filter((login) => login !== opts.myLogin);
@@ -107,7 +116,7 @@ export function selectEligibleReady(
     if (conflicting.length > 0) {
       log(
         "loop",
-        `${key(opts.projectName, issue.number)}: fleet:ready alongside ${conflicting.join(", ")} — inconsistent labels, skipping claim`,
+        `${key(opts.projectName, issue.number)}: ${isReady ? FLEET_LABELS.ready : TRIAGE_LABEL} alongside ${conflicting.join(", ")} — inconsistent labels, skipping claim`,
       );
       return false;
     }
@@ -324,6 +333,7 @@ export async function cycleProject(ctx: LoopContext, project: ProjectConfig): Pr
     getRecord: (issueNumber) => ctx.state.get(project.name, issueNumber),
     projectName: project.name,
     myLogin,
+    triageEnabled: project.triage === true,
   });
   ready = await applyContributorFloor(ctx, project, ready);
   ready = await applyIntakeLint(ctx, project, ready);
@@ -399,8 +409,17 @@ export async function processTicket(ctx: LoopContext, project: ProjectConfig, is
   const scope = key(project.name, issue.number);
   log("loop", `claiming ${scope}: ${issue.title}`);
 
+  const isPlan = issue.labels.includes(PLAN_LABEL);
+  // A decomposition and an investigation are different jobs — when an issue
+  // carries both labels, plan wins deterministically rather than the daemon
+  // silently picking one.
+  const isTriage = !isPlan && project.triage === true && issue.labels.includes(TRIAGE_LABEL);
+
   try {
-    await swapLabel(project, issue.number, FLEET_LABELS.ready, FLEET_LABELS.inProgress);
+    // A triage candidate never carried `fleet:ready`; removing `fleet:triage`
+    // here is also what stops the promoted issue (back in `fleet:ready`) from
+    // being re-investigated on a later cycle.
+    await swapLabel(project, issue.number, isTriage ? TRIAGE_LABEL : FLEET_LABELS.ready, FLEET_LABELS.inProgress);
 
     const myLogin = await getAuthenticatedLogin();
     await addAssignee(project, issue.number, myLogin);
@@ -425,7 +444,6 @@ export async function processTicket(ctx: LoopContext, project: ProjectConfig, is
 
     const elevated = issue.labels.includes(ELEVATE_LABEL);
     const light = issue.labels.includes(LIGHT_LABEL);
-    const isPlan = issue.labels.includes(PLAN_LABEL);
     // A fresh claim otherwise wipes the once-only escalation guard along with
     // everything else the prior attempt recorded — carry it forward so a
     // second failure (now elevated) can't trigger a second auto-escalation.
@@ -443,6 +461,11 @@ export async function processTicket(ctx: LoopContext, project: ProjectConfig, is
       elevated,
       light,
       isPlan,
+      isTriage,
+      // The body triage started from — `finishTriaged` compares it before
+      // appending its spec, so an edit made mid-run can't be silently
+      // overwritten. Only ever written here, never on resume.
+      bodyHashAtClaim: isTriage ? hashBody(issue.body) : undefined,
       autoElevated,
       epicNumber,
       ticketType: worktree.type,
@@ -464,7 +487,7 @@ export async function processTicket(ctx: LoopContext, project: ProjectConfig, is
       firstMessage: buildIssuePrompt(project, issue, comments, epicContext, buildPriorAttemptBlock(priorRecord)),
       elevated,
       light,
-      kind: isPlan ? "plan" : "code",
+      kind: isPlan ? "plan" : isTriage ? "triage" : "code",
       ticketType: worktree.type,
     });
   } catch (err) {

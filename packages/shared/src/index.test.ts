@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  ConfidenceScoreSchema,
   FleetConfigSchema,
+  MachineReviewResultSchema,
   PlanResultSchema,
   ProjectConfigSchema,
   WorkerResultSchema,
   boardStatusFromLabels,
   mergeModelUsage,
+  normalizeLegacyConfidence,
   parseWorkerQuestions,
   priorityOf,
   shortModelName,
@@ -145,7 +148,7 @@ describe("PlanResultSchema", () => {
         { title: "Add X", body: "Problem, acceptance criteria, verification." },
         { title: "Add Y", body: "Problem, acceptance criteria, verification.", priority: "fleet:p2" },
       ],
-      confidence: "high",
+      confidence: 90,
     });
     expect(parsed.success).toBe(true);
   });
@@ -156,7 +159,7 @@ describe("PlanResultSchema", () => {
       summary: "Epic is too vague to decompose.",
       tickets: [],
       blockedReason: "Which subsystem should this target?",
-      confidence: "low",
+      confidence: 30,
     });
     expect(parsed.success).toBe(true);
   });
@@ -166,7 +169,7 @@ describe("PlanResultSchema", () => {
       status: "completed",
       summary: "s",
       tickets: [{ title: "t", body: "b", priority: "fleet:urgent" }],
-      confidence: "high",
+      confidence: 90,
     });
     expect(parsed.success).toBe(false);
   });
@@ -180,7 +183,7 @@ describe("PlanResultSchema", () => {
         { title: "elevated one", body: "b", tier: "elevated" },
         { title: "no tier", body: "b" },
       ],
-      confidence: "high",
+      confidence: 90,
     });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
@@ -193,7 +196,7 @@ describe("PlanResultSchema", () => {
       status: "completed",
       summary: "s",
       tickets: [{ title: "t", body: "b", tier: "urgent" }],
-      confidence: "high",
+      confidence: 90,
     });
     expect(parsed.success).toBe(false);
   });
@@ -201,7 +204,7 @@ describe("PlanResultSchema", () => {
   it("requires status, summary, tickets, and confidence", () => {
     expect(PlanResultSchema.safeParse({}).success).toBe(false);
     expect(
-      PlanResultSchema.safeParse({ status: "completed", summary: "s", confidence: "high" }).success,
+      PlanResultSchema.safeParse({ status: "completed", summary: "s", confidence: 90 }).success,
     ).toBe(false);
   });
 });
@@ -304,7 +307,7 @@ describe("WorkerResultSchema", () => {
   const base = {
     summary: "Did the thing.",
     filesChanged: ["src/index.ts"],
-    confidence: "high" as const,
+    confidence: 90,
   };
 
   it("parses a completed result with prTitle/prBody", () => {
@@ -347,5 +350,80 @@ describe("WorkerResultSchema", () => {
     expect(WorkerResultSchema.safeParse({ ...base, status: "completed", filesChanged: "src/index.ts" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("ConfidenceScoreSchema", () => {
+  it("accepts an integer 0-100", () => {
+    expect(ConfidenceScoreSchema.parse(0)).toBe(0);
+    expect(ConfidenceScoreSchema.parse(72)).toBe(72);
+    expect(ConfidenceScoreSchema.parse(100)).toBe(100);
+  });
+
+  it("rejects out-of-range and non-integer numbers", () => {
+    expect(ConfidenceScoreSchema.safeParse(101).success).toBe(false);
+    expect(ConfidenceScoreSchema.safeParse(-1).success).toBe(false);
+    expect(ConfidenceScoreSchema.safeParse(72.5).success).toBe(false);
+  });
+
+  it("rejects strings, including the legacy low/medium/high values", () => {
+    expect(ConfidenceScoreSchema.safeParse("low").success).toBe(false);
+    expect(ConfidenceScoreSchema.safeParse("high").success).toBe(false);
+    expect(ConfidenceScoreSchema.safeParse("very high").success).toBe(false);
+  });
+});
+
+describe("normalizeLegacyConfidence", () => {
+  /** The shim returns `unknown` — it can't promise the output type of a value it was handed as `unknown`. */
+  const scoreOf = (raw: unknown) => (normalizeLegacyConfidence(raw) as { confidence: unknown }).confidence;
+
+  it("maps each legacy string onto the 0-100 scale", () => {
+    expect(scoreOf({ confidence: "low" })).toBe(30);
+    expect(scoreOf({ confidence: "medium" })).toBe(60);
+    expect(scoreOf({ confidence: "high" })).toBe(90);
+  });
+
+  it("passes a numeric confidence through untouched", () => {
+    const raw = { confidence: 88, summary: "s" };
+
+    expect(normalizeLegacyConfidence(raw)).toBe(raw);
+  });
+
+  it("passes through non-objects and objects with no confidence key", () => {
+    expect(normalizeLegacyConfidence(null)).toBe(null);
+    expect(normalizeLegacyConfidence(undefined)).toBe(undefined);
+    expect(normalizeLegacyConfidence("high")).toBe("high");
+    expect(normalizeLegacyConfidence({ summary: "s" })).toEqual({ summary: "s" });
+  });
+
+  it("leaves the other fields of the result intact", () => {
+    expect(normalizeLegacyConfidence({ status: "completed", confidence: "high" })).toEqual({
+      status: "completed",
+      confidence: 90,
+    });
+  });
+});
+
+describe("confidence on the result contracts", () => {
+  const worker = {
+    status: "completed" as const,
+    summary: "did the thing",
+    filesChanged: ["src/a.ts"],
+  };
+
+  it("parses a numeric worker confidence", () => {
+    expect(WorkerResultSchema.parse({ ...worker, confidence: 88 }).confidence).toBe(88);
+  });
+
+  it("parses a legacy worker confidence once it has been normalized", () => {
+    expect(WorkerResultSchema.safeParse({ ...worker, confidence: "high" }).success).toBe(false);
+    expect(WorkerResultSchema.parse(normalizeLegacyConfidence({ ...worker, confidence: "high" })).confidence).toBe(90);
+  });
+
+  it("requires confidence on a machine review result", () => {
+    const review = { verdict: "pass" as const, summary: "looks fine" };
+
+    expect(MachineReviewResultSchema.safeParse(review).success).toBe(false);
+    expect(MachineReviewResultSchema.parse({ ...review, confidence: 80 }).confidence).toBe(80);
   });
 });

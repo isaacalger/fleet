@@ -205,6 +205,10 @@ export class FleetLoop {
     return getBoard(this.ctx);
   }
 
+  getProjects(): ProjectConfig[] {
+    return this.config.projects;
+  }
+
   getProject(name: string): ProjectConfig | undefined {
     return this.config.projects.find((p) => p.name === name);
   }
@@ -256,7 +260,7 @@ export class FleetLoop {
     worktree: Worktree,
     base: SessionBase,
     workerReport: { summary: string; prBody?: string },
-  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }> {
+  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }> {
     return machineReviewGate(this.ctx, project, issue, worktree, base, workerReport);
   }
 
@@ -266,7 +270,7 @@ export class FleetLoop {
     worktree: Worktree,
     base: SessionBase,
     result: PlanResult,
-  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }> {
+  ): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }> {
     return planReviewGate(this.ctx, project, issue, worktree, base, result);
   }
 
@@ -276,7 +280,7 @@ export class FleetLoop {
     worktreePath: string,
     branch: string,
     summary: string,
-    result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: string },
+    result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: number },
   ): Promise<void> {
     return finishCompleted(this.ctx, project, issue, worktreePath, branch, summary, result);
   }

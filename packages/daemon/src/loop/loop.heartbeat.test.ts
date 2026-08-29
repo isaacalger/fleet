@@ -8,6 +8,7 @@ vi.mock("../github/github.ts", async (importActual) => ({
   ...(await importActual<typeof import("../github/github.ts")>()),
   getStatusCommentInfo: vi.fn(async () => undefined),
   markReady: vi.fn(async () => {}),
+  markTriage: vi.fn(async () => {}),
   refreshHeartbeat: vi.fn(async () => {}),
   refreshHeartbeatIfStale: vi.fn(async () => {}),
   removeAssignee: vi.fn(async () => {}),
@@ -165,6 +166,37 @@ describe("releaseStaleClaims", () => {
     expect(github.upsertStatusComment).toHaveBeenCalledWith(project, 1, expect.stringContaining("someone-else"));
     expect(github.removeAssignee).toHaveBeenCalledWith(project, 1, "someone-else");
     expect(github.markReady).toHaveBeenCalledWith(project, 1);
+  });
+
+  // A triage claim consumes `fleet:triage`, so releasing it back as
+  // `fleet:ready` would hand a still-undiagnosed issue to a coding session.
+  // When this daemon has a record of the ticket, it knows which kind it was.
+  it("restores fleet:triage for a released ticket this daemon has a triage record for", async () => {
+    vi.mocked(github.getStatusCommentInfo).mockResolvedValue({
+      createdAt: "2020-01-01T00:00:00.000Z",
+      heartbeat: { timestamp: "2020-01-01T00:00:00.000Z", owner: "someone-else" },
+    });
+    const ctx = makeCtx();
+    ctx.state.upsert(makeRecord({ project: "alpha", issueNumber: 1, isTriage: true }));
+
+    await releaseStaleClaims(ctx, project, [issue(1, ["fleet:in-progress"], { assignees: ["someone-else"] })], "daemon-a");
+
+    expect(github.markTriage).toHaveBeenCalledWith(project, 1);
+    expect(github.markReady).not.toHaveBeenCalled();
+  });
+
+  it("still restores fleet:ready when the record is for an ordinary code ticket", async () => {
+    vi.mocked(github.getStatusCommentInfo).mockResolvedValue({
+      createdAt: "2020-01-01T00:00:00.000Z",
+      heartbeat: { timestamp: "2020-01-01T00:00:00.000Z", owner: "someone-else" },
+    });
+    const ctx = makeCtx();
+    ctx.state.upsert(makeRecord({ project: "alpha", issueNumber: 1, isTriage: false }));
+
+    await releaseStaleClaims(ctx, project, [issue(1, ["fleet:in-progress"], { assignees: ["someone-else"] })], "daemon-a");
+
+    expect(github.markReady).toHaveBeenCalledWith(project, 1);
+    expect(github.markTriage).not.toHaveBeenCalled();
   });
 
   it("journals a stale-claim-released fleet event", async () => {

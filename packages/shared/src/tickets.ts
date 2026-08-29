@@ -9,6 +9,27 @@ export type TicketStatus =
   /** Operator hit Restart: the old session is gone and the issue is back in `fleet:ready`, awaiting a fresh claim. */
   | "restarting";
 
+/** Every session kind that reports a confidence score. */
+export type ConfidenceStage = "triage" | "plan" | "code" | "machine-review" | "plan-review";
+
+/** One scored session, appended to `TicketRecord.confidenceHistory` and never replaced. */
+export interface ConfidenceEntry {
+  stage: ConfidenceStage;
+  /** 0-100. */
+  score: number;
+  /**
+   * The threshold this score was judged against, or null when the stage was
+   * recorded but not gated (triage with `triageAutoPromote: false`). Stamped at
+   * write time rather than looked up at render time: a Done-column card shows a
+   * ticket that closed long ago, whose project may since have changed its
+   * threshold or left config entirely, so the entry has to be self-describing.
+   */
+  threshold: number | null;
+  /** Present only when a `fleet:confidence-overridden` label carried this score past its gate. */
+  overridden?: true;
+  at: string;
+}
+
 export interface TicketRecord {
   project: string;
   issueNumber: number;
@@ -32,6 +53,22 @@ export interface TicketRecord {
   light?: boolean;
   autoResumed?: boolean;
   isPlan?: boolean;
+  /** True when this ticket was claimed from a `fleet:triage` label — a read-only investigation, not a coding run. */
+  isTriage?: boolean;
+  /** SHA-256 of the issue body as it stood when the triage session opened, used to detect concurrent human edits at finish time. */
+  bodyHashAtClaim?: string;
+  /** The confidence percentage (0-100) the triage session reported. Historical only — the promote decision now comes from `confidenceHistory` via the shared gate. */
+  triageConfidence?: number;
+  /** Append-only trail of every scored session on this ticket, oldest first. Absent on records predating this field. */
+  confidenceHistory?: ConfidenceEntry[];
+  /**
+   * The entry that caused the current hold, cleared once the ticket moves on
+   * (any gate that proceeds, and any fresh claim). Stamped explicitly rather
+   * than inferred from `confidenceHistory.at(-1)`, which cannot distinguish a
+   * live hold from an overridden entry the gate already let through, nor say
+   * which stage's session is the one being resumed.
+   */
+  heldOnConfidence?: ConfidenceEntry;
   /** Set once this ticket has auto-retried on the elevated model after a failure — caps escalation to once, ever. */
   autoElevated?: boolean;
   /** The epic issue number this ticket was filed under, parsed from its `Part-of: #<epic>` body line at claim time. */

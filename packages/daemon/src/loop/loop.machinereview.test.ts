@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PlanResult, ProjectConfig, TicketRecord } from "@fleet/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { makeApprovals, makeFleetConfig, makeProject, makeRecord, makeTempState } from "../test-support.ts";
+import { TEST_CONFIDENCE, makeApprovals, makeFleetConfig, makeProject, makeRecord, makeTempState } from "../test-support.ts";
 import { machineReviewLine } from "./finish.ts";
 import { FleetLoop } from "./loop.ts";
 import type { MachineReviewOutcome, PlanReviewOutcome } from "../session/review.ts";
@@ -21,6 +21,8 @@ vi.mock("../github/github.ts", () => ({
   upsertStatusComment: vi.fn(async () => {}),
   clearAssignees: vi.fn(async () => {}),
   closePullRequest: vi.fn(async () => {}),
+  getIssue: vi.fn(async () => undefined),
+  removeLabel: vi.fn(async () => {}),
 }));
 
 vi.mock("../github/worktree.ts", () => ({
@@ -72,14 +74,14 @@ function makeLoop(seed?: TicketRecord, opts: { dryRun?: boolean } = {}) {
       w: typeof worktree,
       base: { costUsd: number; modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }> },
       report: { summary: string; prBody?: string },
-    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }>;
+    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }>;
     planReviewGate: (
       p: ProjectConfig,
       i: typeof issue,
       w: typeof worktree,
       base: { costUsd: number; modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUsd: number }> },
       result: PlanResult,
-    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }>;
+    ) => Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }>;
     resetForFreshClaim: (p: ProjectConfig, issueNumber: number) => Promise<void>;
   };
   return { loop, state, internals };
@@ -97,7 +99,7 @@ function planResult(patch: Partial<PlanResult> = {}): PlanResult {
   return {
     status: "completed",
     summary: "Decomposed into two tickets.",
-    confidence: "high",
+    confidence: TEST_CONFIDENCE,
     tickets: [
       { title: "Ticket A", body: "## Problem\n\nA\n\n## Acceptance criteria\n\n- [ ] a\n\n## Verification\n\nrun a" },
       { title: "Ticket B", body: "## Problem\n\nB\n\n## Acceptance criteria\n\n- [ ] b\n\n## Verification\n\nrun b" },
@@ -116,7 +118,7 @@ beforeEach(() => {
 describe("machineReviewGate", () => {
   it("proceeds on a pass verdict and records the outcome and reviewer cost", async () => {
     vi.mocked(review.runMachineReview).mockResolvedValue(
-      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", findings: [] } }),
+      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", confidence: TEST_CONFIDENCE, findings: [] } }),
     );
     const { state, internals } = makeLoop(record());
     const base = { costUsd: 3 };
@@ -152,7 +154,7 @@ describe("machineReviewGate", () => {
     try {
       vi.mocked(github.getIssueComments).mockResolvedValue(["@alice: please also handle X"]);
       vi.mocked(review.runMachineReview).mockResolvedValue(
-        reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", findings: [] } }),
+        reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", confidence: TEST_CONFIDENCE, findings: [] } }),
       );
       const { internals } = makeLoop(record({ ticketType: "api", worktreePath: dir }));
 
@@ -173,7 +175,7 @@ describe("machineReviewGate", () => {
   it("reviews without the discussion when the comment fetch fails, rather than skipping the review", async () => {
     vi.mocked(github.getIssueComments).mockRejectedValue(new Error("gh exploded"));
     vi.mocked(review.runMachineReview).mockResolvedValue(
-      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", findings: [] } }),
+      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", confidence: TEST_CONFIDENCE, findings: [] } }),
     );
     const { state, internals } = makeLoop(record());
 
@@ -192,6 +194,7 @@ describe("machineReviewGate", () => {
         result: {
           verdict: "findings",
           summary: "One problem.",
+          confidence: TEST_CONFIDENCE,
           findings: [{ file: "src/a.ts", line: 3, severity: "major", summary: "off-by-one", detail: "bound excludes last item" }],
         },
       }),
@@ -271,6 +274,21 @@ describe("machineReviewGate", () => {
     expect(review.runMachineReview).not.toHaveBeenCalled();
   });
 
+  it("holds when a passing review reports low confidence in itself", async () => {
+    vi.mocked(review.runMachineReview).mockResolvedValue(
+      reviewOutcome({ result: { verdict: "pass", summary: "Probably fine?", confidence: 40, findings: [] } }),
+    );
+    const { state, internals } = makeLoop(record());
+
+    const gate = await internals.machineReviewGate(project, issue, worktree, { costUsd: 0 }, workerReport);
+
+    expect(gate.action).toBe("hold");
+    if (gate.action === "hold") expect(gate.reason).toContain("machine-review confidence 40%");
+    expect(worktreeMod.pushBranch).not.toHaveBeenCalled();
+    expect(github.createPullRequest).not.toHaveBeenCalled();
+    expect(state.get("alpha", 7)?.confidenceHistory?.at(-1)?.score).toBe(40);
+  });
+
   it("skips an empty branch — that's finishCompleted's blocked-guard territory", async () => {
     vi.mocked(worktreeMod.hasCommits).mockResolvedValue(false);
     const { state, internals } = makeLoop(record());
@@ -286,7 +304,7 @@ describe("machineReviewGate", () => {
 describe("planReviewGate", () => {
   it("proceeds on a pass verdict and records the outcome and reviewer cost", async () => {
     vi.mocked(review.runPlanReview).mockResolvedValue(
-      planReviewOutcome({ result: { verdict: "pass", summary: "Good decomposition.", findings: [] } }),
+      planReviewOutcome({ result: { verdict: "pass", summary: "Good decomposition.", confidence: TEST_CONFIDENCE, findings: [] } }),
     );
     const { state, internals } = makeLoop(record());
     const base = { costUsd: 3 };
@@ -307,6 +325,7 @@ describe("planReviewGate", () => {
         result: {
           verdict: "findings",
           summary: "One ticket is too broad.",
+          confidence: TEST_CONFIDENCE,
           findings: [{ ticketIndex: 1, severity: "major", summary: "not PR-sized", detail: "split into two tickets" }],
         },
       }),
@@ -353,6 +372,19 @@ describe("planReviewGate", () => {
     expect(gate).toEqual({ action: "proceed" });
     expect(state.get("alpha", 7)?.machineReviewOutcome).toBe("skipped");
     expect(state.getPausedUntil()).toBe(new Date(Date.parse("2026-07-27T12:00:00.000Z") + 5 * 60_000).toISOString());
+  });
+
+  it("holds when a passing plan review reports low confidence in itself", async () => {
+    vi.mocked(review.runPlanReview).mockResolvedValue(
+      planReviewOutcome({ result: { verdict: "pass", summary: "Probably fine?", confidence: 40, findings: [] } }),
+    );
+    const { state, internals } = makeLoop(record());
+
+    const gate = await internals.planReviewGate(project, issue, worktree, { costUsd: 0 }, planResult());
+
+    expect(gate.action).toBe("hold");
+    if (gate.action === "hold") expect(gate.reason).toContain("plan-review confidence 40%");
+    expect(state.get("alpha", 7)?.confidenceHistory?.at(-1)?.score).toBe(40);
   });
 
   it("never runs when the project opts out — shares the machineReview switch with the code-review gate", async () => {

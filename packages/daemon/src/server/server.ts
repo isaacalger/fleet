@@ -9,6 +9,7 @@ import { z } from "zod";
 import {
   FLEET_LABELS,
   PRIORITY_LABELS,
+  TRIAGE_LABEL,
   type JournalEntry,
   type TicketDetail,
   type TicketDiff,
@@ -16,7 +17,7 @@ import {
   type TicketTranscript,
 } from "@fleet/shared";
 import type { ApprovalManager } from "../session/approvals.ts";
-import { bodyWithDependsOn, createIssue, getPrDiff, setPriority } from "../github/github.ts";
+import { addLabel, bodyWithDependsOn, createIssue, getIssue, getPrDiff, listNonFleetIssues, setPriority } from "../github/github.ts";
 import { log, logError } from "../log.ts";
 import type { FleetLoop } from "../loop/loop.ts";
 import { RESTART_EXIT_CODE } from "../restart-code.ts";
@@ -342,6 +343,52 @@ export function createApp(opts: {
       .filter((t) => t.project === name)
       .map((t) => ({ number: t.issueNumber, title: t.title, status: t.status, priority: t.priority, url: t.url }));
     return c.json({ tickets });
+  });
+
+  // Triage: issues carrying no `fleet:*` label are invisible to the board by
+  // design, so this is the only place they surface. Projects with triage off
+  // are omitted entirely rather than listed empty. One project's `gh` failure
+  // must not blank the whole panel, so each is caught independently.
+  app.get("/api/triage", async (c) => {
+    const projects = loop.getProjects().filter((p) => p.triage);
+    const results = await Promise.all(
+      projects.map(async (project) => {
+        try {
+          return { project: project.name, issues: await listNonFleetIssues(project) };
+        } catch (err) {
+          logError("server", `listing triage issues for ${project.name}`, err);
+          return { project: project.name, issues: [], error: err instanceof Error ? err.message : String(err) };
+        }
+      }),
+    );
+    return c.json({ projects: results });
+  });
+
+  // "Investigate" is just labelling: the ordinary claim loop picks `fleet:triage`
+  // up on its next cycle. The 409 is load-bearing twice over — it keeps an issue
+  // already in the pipeline from re-entering, and makes a double-click a no-op.
+  app.post("/api/triage/:project/:issue/investigate", async (c) => {
+    const name = c.req.param("project");
+    const issueNumber = Number(c.req.param("issue"));
+    if (!Number.isInteger(issueNumber) || issueNumber <= 0) return c.json({ error: "invalid issue number" }, 400);
+    const project = loop.getProject(name);
+    if (!project) return c.json({ error: `unknown project ${name}` }, 404);
+    if (!project.triage) return c.json({ error: `triage is disabled for ${name}` }, 400);
+
+    const issue = await getIssue(project, issueNumber);
+    if (!issue) return c.json({ error: `${name}#${issueNumber} not found` }, 404);
+    if (issue.labels.some((l) => l.startsWith("fleet:"))) {
+      return c.json({ error: `${name}#${issueNumber} already carries a fleet:* label` }, 409);
+    }
+
+    try {
+      await addLabel(project, issueNumber, TRIAGE_LABEL);
+    } catch (err) {
+      logError("server", `labelling ${name}#${issueNumber} for triage`, err);
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+    log("server", `queued ${name}#${issueNumber} for triage investigation`);
+    return c.json({ ok: true, queued: true });
   });
 
   app.get("/api/approvals", (c) => c.json({ approvals: approvals.list() }));

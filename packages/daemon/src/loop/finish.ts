@@ -5,9 +5,13 @@ import {
   type PlanResult,
   type ProjectConfig,
   type TicketRecord,
+  type TriageResult,
 } from "@fleet/shared";
+import { confidenceGate, recordConfidence, thresholdFor } from "./confidence.ts";
 import { key, type LoopContext } from "./context.ts";
 import {
+  addLabel,
+  appendTriageSpecSafely,
   bodyWithChildTaskList,
   bodyWithDependsOn,
   bodyWithPartOf,
@@ -28,6 +32,7 @@ import { log, logError } from "../log.ts";
 import { hasCommits, pushBranch } from "../github/worktree.ts";
 import { gatherFailurePostMortem } from "./postmortem.ts";
 import { issueUrl, notify } from "../notify.ts";
+import { renderTriageSpec } from "./triage.ts";
 
 const PR_FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
 
@@ -73,12 +78,21 @@ export function machineReviewLine(outcome: TicketRecord["machineReviewOutcome"])
  * fix, and with no record the `autoElevated: true` write-back would silently
  * no-op, turning "once" into an unbounded claim→fail→escalate loop. Those
  * failures park in `fleet:needs-input` for a human instead.
+ *
+ * A triage never escalates. Re-running a failed *investigation* on a stronger
+ * model would be defensible in principle, but escalation as implemented moves
+ * the issue to `fleet:ready` (`escalateLabelArgs`) — and claiming a triage
+ * consumes its `fleet:triage` label, so the next claim sees a plain ready issue
+ * and runs it as CODE against a bug nothing has diagnosed yet. Escalation and
+ * triage's fail-closed contract are therefore incompatible: a failed triage
+ * parks in `fleet:needs-input` for a human, always.
  */
 export function shouldAutoElevate(
   project: { elevatedModel?: string; autoElevateOnFailure?: boolean },
-  record: { elevated?: boolean; autoElevated?: boolean } | undefined,
+  record: { elevated?: boolean; autoElevated?: boolean; isTriage?: boolean } | undefined,
 ): boolean {
   if (!record) return false;
+  if (record.isTriage) return false;
   if (!project.elevatedModel) return false;
   if (project.autoElevateOnFailure === false) return false;
   if (record.elevated) return false;
@@ -112,7 +126,7 @@ export async function finishCompleted(
   worktreePath: string,
   branch: string,
   summary: string,
-  result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: string },
+  result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: number },
 ): Promise<void> {
   if (!(await hasCommits(project, worktreePath))) {
     await finishBlocked(ctx, project, issue, "Worker reported completed but made no commits.", summary);
@@ -146,7 +160,7 @@ export async function finishCompleted(
     }
     await moveToReview(ctx, project, issue.number, {
       comment: [
-        `**Status: ready for review** (confidence: ${result.confidence})`,
+        `**Status: ready for review** (confidence: ${result.confidence}%)`,
         summary,
         machineReviewLine(record?.machineReviewOutcome),
         result.filesChanged.length > 0 ? `Files changed:\n${result.filesChanged.map((f) => `- \`${f}\``).join("\n")}` : "",
@@ -215,7 +229,7 @@ export async function finishPlanned(
     const record = ctx.state.get(project.name, issue.number);
     await moveToReview(ctx, project, issue.number, {
       comment: [
-        `**Status: planned** (confidence: ${result.confidence})`,
+        `**Status: planned** (confidence: ${result.confidence}%)`,
         result.summary,
         machineReviewLine(record?.machineReviewOutcome),
         "This plan re-completed after its children were already filed — no new issues were created. Review the existing children against the summary above.",
@@ -267,7 +281,7 @@ export async function finishPlanned(
   const record = ctx.state.get(project.name, issue.number);
   await moveToReview(ctx, project, issue.number, {
     comment: [
-      `**Status: planned** (confidence: ${result.confidence})`,
+      `**Status: planned** (confidence: ${result.confidence}%)`,
       result.summary,
       machineReviewLine(record?.machineReviewOutcome),
       created.length > 0
@@ -299,6 +313,89 @@ async function hasExistingChildren(project: ProjectConfig, issue: ReadyIssue): P
   }
 }
 
+/**
+ * Terminal path for a triage session. Writes the spec into the issue body when
+ * no human edited it mid-run, then promotes to `fleet:ready` only when the run
+ * completed cleanly and its confidence meets the project threshold.
+ *
+ * Triage fails closed, the inverse of machine review's fail-open: a collision,
+ * a blocked result, or any error holds the ticket for a human. A failed review
+ * costs a missed check; a triage that promoted on a failure would start an
+ * unsupervised coding session on an undiagnosed bug.
+ */
+export async function finishTriaged(
+  ctx: LoopContext,
+  project: ProjectConfig,
+  issue: ReadyIssue,
+  result: TriageResult,
+): Promise<void> {
+  const scope = key(project.name, issue.number);
+  const record = ctx.state.get(project.name, issue.number);
+  ctx.state.update(project.name, issue.number, { triageConfidence: result.confidence });
+
+  const spec = renderTriageSpec(result);
+  // `?? ""` is deliberate: an empty string can never equal a real SHA-256, so a
+  // missing claim-time hash routes to "commented" — failing closed.
+  const written = await appendTriageSpecSafely(project, issue.number, spec, record?.bodyHashAtClaim ?? "");
+
+  // The collision and blocked checks short-circuit *before* the gate: neither
+  // is a confidence question, and both fail closed on their own.
+  const blocker =
+    written === "commented"
+      ? "the issue body was edited while triage was running"
+      : result.status === "blocked"
+        ? `triage is blocked: ${result.blockedReason ?? "no reason given"}`
+        : null;
+
+  let promote = false;
+  let held = blocker;
+  if (blocker === null) {
+    const gate = await confidenceGate(ctx, project, issue.number, "triage", result.confidence);
+    promote = gate.action === "proceed";
+    held = gate.action === "hold" ? gate.reason : null;
+  } else {
+    // Record the score even when a non-confidence blocker holds the ticket, so
+    // the trail shows what triage actually reported.
+    recordConfidence(ctx, project.name, issue.number, "triage", result.confidence, thresholdFor(project, "triage"));
+  }
+
+  try {
+    await upsertStatusComment(project, issue.number, [
+      `**Triage complete** — confidence ${result.confidence}%`,
+      "",
+      `**Root cause:** ${result.rootCause}`,
+      ...(result.evidence.length > 0 ? ["", "**Evidence:**", ...result.evidence.map((e) => `- \`${e}\``)] : []),
+      "",
+      result.summary,
+      "",
+      promote
+        ? "Promoted to `fleet:ready` — a coding worker will claim it on a later cycle."
+        : `Held for review${held ? ` — ${held}` : ""}.`,
+    ].join("\n"));
+  } catch (err) {
+    logError("loop", `${scope}: could not post the triage status comment`, err);
+  }
+
+  if (promote) {
+    // Tier labels go on before the swap so the issue is never briefly
+    // `fleet:ready` without its tier — the claim loop could otherwise pick it
+    // up mid-write on the wrong model.
+    if (result.suggestedTier === "light") await addLabel(project, issue.number, LIGHT_LABEL);
+    if (result.suggestedTier === "elevated") await addLabel(project, issue.number, ELEVATE_LABEL);
+    await swapLabel(project, issue.number, FLEET_LABELS.inProgress, FLEET_LABELS.ready);
+    // No dedicated "ready" ticket status exists; `restarting` is documented as
+    // "the issue is back in `fleet:ready`, awaiting a fresh claim", which is
+    // exactly where a promoted triage leaves it.
+    ctx.state.update(project.name, issue.number, { status: "restarting", lastSummary: result.summary });
+  } else {
+    await swapLabel(project, issue.number, FLEET_LABELS.inProgress, FLEET_LABELS.needsInput);
+    ctx.state.update(project.name, issue.number, { status: "needs-input", lastSummary: result.summary });
+  }
+  ctx.emitBoard();
+
+  log("loop", `${scope}: triage ${promote ? "promoted to fleet:ready" : "held for review"} at ${result.confidence}% confidence`);
+}
+
 export async function finishBlocked(
   ctx: LoopContext,
   project: ProjectConfig,
@@ -311,7 +408,16 @@ export async function finishBlocked(
     await upsertStatusComment(
       project,
       issue.number,
-      [`**Status: needs input**`, summary ?? "", `Blocked on: ${reason}`, "Reply from the fleet dashboard to continue."].filter(Boolean).join("\n\n"),
+      [
+        `**Status: needs input**`,
+        summary ?? "",
+        `Blocked on: ${reason}`,
+        "Reply from the fleet dashboard to continue.",
+        // Confidence holds land here with real work already committed locally,
+        // and nothing else says where it went. Hedged because a ticket blocked
+        // before it wrote anything reaches this same comment.
+        "Any commits this session made are still local to its worktree and were never pushed. A reply resumes on top of them; **Restart**, or re-labeling the issue `fleet:ready`, rebuilds the worktree from scratch and discards them.",
+      ].filter(Boolean).join("\n\n"),
     );
   } catch (err) {
     logError("loop", `${blockedScope}: could not post the needs-input status comment`, err);

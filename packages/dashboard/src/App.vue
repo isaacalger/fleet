@@ -29,6 +29,7 @@ import FileTicketPanel from "./components/FileTicketPanel.vue";
 import HistoryView from "./components/HistoryView.vue";
 import TicketCard from "./components/TicketCard.vue";
 import TicketDetail from "./components/TicketDetail.vue";
+import TriagePanel from "./components/TriagePanel.vue";
 
 // State and mutations live in the Pinia stores (#209); this component is
 // layout plus presentation-only derivations. Leaf components stay
@@ -327,6 +328,7 @@ onUnmounted(() => {
             />
           </BoardColumn>
         </div>
+        <TriagePanel />
       </main>
       <HistoryView v-else :project-filter="projectFilter" @select="selected = $event" />
       <TicketDetail v-if="selected" :ticket="selected" @close="selected = undefined" />

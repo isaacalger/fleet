@@ -174,6 +174,17 @@ describe("StateStore", () => {
     expect(store.all()).toEqual([]);
   });
 
+  it("round-trips triage fields", () => {
+    const store = new StateStore(tempDataDir());
+    store.upsert(
+      ticket(7, { project: "p", isTriage: true, bodyHashAtClaim: "a".repeat(64), triageConfidence: 85 }),
+    );
+    const read = store.get("p", 7);
+    expect(read?.isTriage).toBe(true);
+    expect(read?.bodyHashAtClaim).toBe("a".repeat(64));
+    expect(read?.triageConfidence).toBe(85);
+  });
+
   it("upsert inserts new records and overwrites existing ones by project+issueNumber", () => {
     const store = new StateStore(tempDataDir());
     store.upsert(ticket(1, { status: "running" }));

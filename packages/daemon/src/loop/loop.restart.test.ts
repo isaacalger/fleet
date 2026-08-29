@@ -11,6 +11,7 @@ vi.mock("../github/github.ts", () => ({
   getPrState: vi.fn(),
   listFleetIssues: vi.fn(async () => []),
   markReady: vi.fn(async () => {}),
+  markTriage: vi.fn(async () => {}),
   swapLabel: vi.fn(async () => {}),
   toBoardTicket: vi.fn(),
   upsertStatusComment: vi.fn(async () => {}),
@@ -135,6 +136,27 @@ describe("restartTicket with no live session", () => {
     const { loop } = makeLoop(record());
     await expect(loop.restartTicket("beta", 7)).rejects.toThrow(/unknown project/);
     expect(github.markReady).not.toHaveBeenCalled();
+  });
+
+  // Claiming a triage consumes `fleet:triage`, so `markReady` here would restart
+  // the ticket as a coding session against the reporter's original, still
+  // undiagnosed report. A restart must re-run the investigation instead.
+  it("restores fleet:triage rather than fleet:ready when the ticket was claimed as a triage", async () => {
+    const { loop } = makeLoop(record({ status: "failed", sessionLive: false, isTriage: true }));
+
+    await loop.restartTicket("alpha", 7);
+
+    expect(github.markTriage).toHaveBeenCalledWith(project, 7);
+    expect(github.markReady).not.toHaveBeenCalled();
+  });
+
+  it("still restores fleet:ready for an ordinary code ticket", async () => {
+    const { loop } = makeLoop(record({ status: "failed", sessionLive: false, isTriage: false }));
+
+    await loop.restartTicket("alpha", 7);
+
+    expect(github.markReady).toHaveBeenCalledWith(project, 7);
+    expect(github.markTriage).not.toHaveBeenCalled();
   });
 });
 

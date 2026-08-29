@@ -3,19 +3,22 @@ import type { CanUseTool, HookCallback, SDKMessage, SDKPermissionDenial, SDKUser
 import { z } from "zod";
 import {
   PlanResultSchema,
+  TriageResultSchema,
   WorkerResultSchema,
+  normalizeLegacyConfidence,
   type Effort,
   type ModelUsageSummary,
   type PlanResult,
   type ProjectConfig,
   type TicketRecord,
+  type TriageResult,
   type WorkerResult,
 } from "@fleet/shared";
 import type { Journal } from "../store/journal.ts";
 import { log } from "../log.ts";
 import { MessageQueue } from "./queue.ts";
 
-export type SessionKind = "code" | "plan";
+export type SessionKind = "code" | "plan" | "triage";
 
 /**
  * The SDK hands `outputFormat`'s schema to the API as the `StructuredOutput`
@@ -35,6 +38,10 @@ export const PLAN_OUTPUT_SCHEMA = z.toJSONSchema(PlanResultSchema, {
   target: "draft-7",
 }) as Record<string, unknown>;
 
+export const TRIAGE_OUTPUT_SCHEMA = z.toJSONSchema(TriageResultSchema, {
+  target: "draft-7",
+}) as Record<string, unknown>;
+
 const DEFAULT_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "TodoWrite", "Skill", "Agent", "Task", "mcp__fleet"];
 
 const WORKER_CONTRACT = `
@@ -46,6 +53,7 @@ Contract:
 - Run the project's own checks (tests, typecheck, lint) before declaring completion when they exist.
 - If you hit a decision the issue does not answer, do NOT guess: finish with status "blocked" and put the specific question in blockedReason. A human may answer in a follow-up message — then continue the work.
 - Your final structured output: status "completed" requires prTitle and prBody; status "blocked" requires blockedReason.
+- Report a calibrated confidence percentage (0-100). A score below the project's threshold stops this ticket for human review instead of opening a PR, so an overstated number wastes a human's time on work you knew was shaky — and an understated one stops work that was fine. 90+ means you verified the change end to end; below 50 means you are guessing.
 `.trim();
 
 const PLANNER_CONTRACT = `
@@ -58,6 +66,20 @@ Contract:
 - If a child genuinely can't be implemented before another lands (e.g. "use the schema field" needs "add the schema field" first), set that child's dependsOnIndex to the 0-based index of the sibling(s) it depends on in tickets[] — sparingly, and only pointing at an earlier index (a later or self index is dropped).
 - If the epic is too ambiguous to decompose confidently, do NOT guess: finish with status "blocked" and put the specific question in blockedReason.
 - Your final structured output lists every proposed child ticket in tickets[].
+- Report a calibrated confidence percentage (0-100) for the decomposition as a whole. A score below the project's threshold stops the epic for human review instead of filing the child tickets, so be honest: 90+ means every child is genuinely self-contained and correctly scoped; below 50 means you are unsure the epic decomposes this way at all.
+`.trim();
+
+const TRIAGE_CONTRACT = `
+You are a fleet triage agent: you investigate exactly one GitHub issue in a dedicated git worktree and produce a diagnosis, not a fix.
+
+Contract:
+- This is a read-only investigation. Never edit files, never commit, never push, never open PRs, and never change issue state — the orchestrator handles all of that.
+- Reproduce and trace the reported problem to a specific root cause in the code. Cite concrete file:line evidence for your diagnosis.
+- Use the systematic-debugging skill for this. It is available in this repo's .claude/skills/ — invoke it rather than guessing at a cause.
+- Running the test suite and other read-only commands to reproduce the problem is expected and encouraged.
+- Finish by producing a spec a separate coding agent could implement with no other context: a self-contained problem statement, checkable acceptance criteria, and concrete verification steps.
+- Report a calibrated confidence percentage. Your score decides whether the spec goes straight to a coding agent with no human review, so an overstated number causes real harm. If you could not trace the defect to specific lines, say so with a low score rather than dressing up a guess.
+- If you genuinely cannot proceed without a human decision, finish with status "blocked" and ask one specific question.
 `.trim();
 
 /**
@@ -70,9 +92,9 @@ Contract:
  * verify.
  */
 export function buildSystemPromptAppend(kind: SessionKind, typeContract?: string, verifyCommands?: string[]): string {
-  const base = kind === "plan" ? PLANNER_CONTRACT : WORKER_CONTRACT;
-  if (kind === "plan") return base;
-  const parts = [base];
+  if (kind === "triage") return TRIAGE_CONTRACT;
+  if (kind === "plan") return PLANNER_CONTRACT;
+  const parts = [WORKER_CONTRACT];
   if (typeContract) parts.push(typeContract);
   if (verifyCommands && verifyCommands.length > 0) {
     parts.push(
@@ -197,7 +219,15 @@ export interface PlanTurnResult {
   terminalReason?: string;
 }
 
-export type TurnResult = CodeTurnResult | PlanTurnResult;
+export interface TriageTurnResult {
+  kind: "triage";
+  result?: TriageResult;
+  errorSubtype?: string;
+  limitResetAt?: string;
+  terminalReason?: string;
+}
+
+export type TurnResult = CodeTurnResult | PlanTurnResult | TriageTurnResult;
 
 /** The error text `finishFailed` reports for a turn that didn't complete — `errorSubtype` plus `terminalReason` when the SDK supplied one, so "why did this turn end" isn't guessed from subtype alone. */
 export function formatTurnError(turn: { errorSubtype?: string; terminalReason?: string }): string {
@@ -408,7 +438,7 @@ export class WorkerSession {
         hooks: {
           PreToolUse: [{
             matcher: "Bash",
-            hooks: [makeJournaledBashGuard(this.kind === "plan" ? denyForbiddenPlanBash : denyForbiddenBash, opts.journal)],
+            hooks: [makeJournaledBashGuard(this.kind === "code" ? denyForbiddenBash : denyForbiddenPlanBash, opts.journal)],
           }],
         },
         settingSources: ["project"],
@@ -420,7 +450,11 @@ export class WorkerSession {
         },
         outputFormat: {
           type: "json_schema",
-          schema: this.kind === "plan" ? PLAN_OUTPUT_SCHEMA : WORKER_OUTPUT_SCHEMA,
+          schema: this.kind === "plan"
+            ? PLAN_OUTPUT_SCHEMA
+            : this.kind === "triage"
+              ? TRIAGE_OUTPUT_SCHEMA
+              : WORKER_OUTPUT_SCHEMA,
         },
       },
     });
@@ -471,12 +505,17 @@ export class WorkerSession {
         if (message.type === "result") {
           if (message.subtype === "success") {
             const structuredOutput = message.structured_output;
+            if (this.kind === "triage") {
+              const parsed = TriageResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
+              if (parsed.success) return { kind: "triage", result: normalizeTriageResult(parsed.data) };
+              return { kind: "triage", errorSubtype: "invalid_structured_output", terminalReason: message.terminal_reason };
+            }
             if (this.kind === "plan") {
-              const parsed = PlanResultSchema.safeParse(structuredOutput);
+              const parsed = PlanResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
               if (parsed.success) return { kind: "plan", result: normalizePlanResult(parsed.data) };
               return { kind: "plan", errorSubtype: "invalid_structured_output", terminalReason: message.terminal_reason };
             }
-            const parsed = WorkerResultSchema.safeParse(structuredOutput);
+            const parsed = WorkerResultSchema.safeParse(normalizeLegacyConfidence(structuredOutput));
             if (parsed.success) return { kind: "code", result: normalizeResult(parsed.data) };
             return { kind: "code", errorSubtype: "invalid_structured_output", terminalReason: message.terminal_reason };
           }
@@ -653,6 +692,27 @@ function normalizePlanResult(result: PlanResult): PlanResult {
     summary: unescapeNewlines(result.summary),
     blockedReason: result.blockedReason ? unescapeNewlines(result.blockedReason) : result.blockedReason,
     tickets: result.tickets.map((t) => ({ ...t, body: unescapeNewlines(t.body) })),
+  };
+}
+
+/**
+ * Same double-escape repair as `normalizeResult`/`normalizePlanResult`, over the
+ * five markdown fields a triage result renders into GitHub: the status comment's
+ * `summary`/`blockedReason`, and the three `spec` sections `renderTriageSpec`
+ * turns into a promoted issue body that a coding worker then reads back. Left
+ * alone: `rootCause` and `evidence[]` are short single-line values.
+ */
+export function normalizeTriageResult(result: TriageResult): TriageResult {
+  return {
+    ...result,
+    summary: unescapeNewlines(result.summary),
+    blockedReason: result.blockedReason ? unescapeNewlines(result.blockedReason) : result.blockedReason,
+    spec: {
+      ...result.spec,
+      problem: unescapeNewlines(result.spec.problem),
+      acceptanceCriteria: unescapeNewlines(result.spec.acceptanceCriteria),
+      verification: unescapeNewlines(result.spec.verification),
+    },
   };
 }
 

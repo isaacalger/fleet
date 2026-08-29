@@ -4,3 +4,7 @@ dist/
 .fleet/
 fleet.config.json
 *.log
+
+# Obsidian per-user pane layout (churns every session)
+docs/.obsidian/workspace.json
+docs/.obsidian/workspace-mobile.json

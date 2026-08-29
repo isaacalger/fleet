@@ -1,6 +1,6 @@
 import type { FleetConfig, PlanResult, ProjectConfig, TicketRecord } from "@fleet/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeApprovals, makeCtx, makeFleetConfig, makeProject, makeRecord, makeTempState } from "../test-support.ts";
+import { TEST_CONFIDENCE, makeApprovals, makeCtx, makeFleetConfig, makeProject, makeRecord, makeTempState } from "../test-support.ts";
 import { readJournalTail } from "../store/journal.ts";
 import { finishPlanned, PostCompletionError, resolveDependsOnIndex } from "./finish.ts";
 import { FleetLoop } from "./loop.ts";
@@ -64,7 +64,7 @@ function makeLoop(seed?: TicketRecord, configPatch: Partial<FleetConfig> = {}) {
       worktreePath: string,
       branch: string,
       summary: string,
-      result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: string },
+      result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: number },
     ) => Promise<void>;
     finishBlocked: (p: ProjectConfig, i: typeof issue, reason: string, summary?: string) => Promise<void>;
     finishFailed: (p: ProjectConfig, i: typeof issue, error: string, opts?: { postCompletion?: boolean }) => Promise<void>;
@@ -72,7 +72,7 @@ function makeLoop(seed?: TicketRecord, configPatch: Partial<FleetConfig> = {}) {
   return { loop, state, internals };
 }
 
-const completedResult = { prTitle: "Fix the thing", prBody: "It's fixed.", filesChanged: ["src/a.ts"], confidence: "high" };
+const completedResult = { prTitle: "Fix the thing", prBody: "It's fixed.", filesChanged: ["src/a.ts"], confidence: TEST_CONFIDENCE };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -105,6 +105,7 @@ describe("finishCompleted — status comment error policy", () => {
     await internals.finishCompleted(project, issue, "/tmp/wt/7", "fleet/7", "did the thing", completedResult);
 
     expect(github.upsertStatusComment).toHaveBeenCalledOnce();
+    expect(vi.mocked(github.upsertStatusComment).mock.calls[0]?.[2]).toContain(`confidence: ${TEST_CONFIDENCE}%`);
     expect(github.swapLabel).toHaveBeenCalledWith(project, 7, "fleet:in-progress", "fleet:review");
     expect(state.get("alpha", 7)?.status).toBe("review");
   });
@@ -204,6 +205,47 @@ describe("finishFailed — auto-elevation", () => {
       }),
     );
   });
+
+  /** `finishFailed` for real (not stubbed) against an elevating project, so the labels it actually writes are observable. */
+  function makeElevatingLoop(seed: TicketRecord) {
+    const elevatingProject = makeProject({ elevatedModel: "claude-opus-5" });
+    const { dataDir, state } = makeTempState("fleet-finish-triage-");
+    state.upsert(seed);
+    const config = makeFleetConfig({ dataDir, projects: [elevatingProject] });
+    const loop = new FleetLoop(config, state, dataDir, makeApprovals(), false);
+    const internals = loop as unknown as {
+      finishFailed: (p: ProjectConfig, i: typeof issue, error: string) => Promise<void>;
+    };
+    return { elevatingProject, state, internals };
+  }
+
+  it("parks a failed triage in fleet:needs-input instead of escalating it into a fleet:ready coding session", async () => {
+    const { elevatingProject, state, internals } = makeElevatingLoop(record({ isTriage: true, model: "claude-sonnet-5" }));
+
+    await internals.finishFailed(elevatingProject, issue, "invalid_structured_output");
+
+    // The whole point: escalation would `--add-label fleet:elevate --add-label
+    // fleet:ready`, and the triage label was consumed at claim — so the next
+    // claim would run an *elevated code session* on an undiagnosed bug.
+    expect(github.escalateToElevated).not.toHaveBeenCalled();
+    expect(github.swapLabel).toHaveBeenCalledWith(elevatingProject, 7, "fleet:in-progress", "fleet:needs-input");
+    expect(github.swapLabel).not.toHaveBeenCalledWith(elevatingProject, 7, "fleet:in-progress", "fleet:ready");
+    expect(github.markReady).not.toHaveBeenCalled();
+    const updated = state.get("alpha", 7);
+    expect(updated?.status).toBe("failed");
+    // Never burns the once-only escalation budget either — it was never eligible.
+    expect(updated?.autoElevated).toBeUndefined();
+  });
+
+  it("still auto-escalates a failed code ticket — the triage guard is scoped to triage only", async () => {
+    const { elevatingProject, state, internals } = makeElevatingLoop(record({ isTriage: false, model: "claude-sonnet-5" }));
+
+    await internals.finishFailed(elevatingProject, issue, "the model gave up");
+
+    expect(github.escalateToElevated).toHaveBeenCalledWith(elevatingProject, 7);
+    expect(github.swapLabel).not.toHaveBeenCalledWith(elevatingProject, 7, "fleet:in-progress", "fleet:needs-input");
+    expect(state.get("alpha", 7)?.autoElevated).toBe(true);
+  });
 });
 
 describe("resolveDependsOnIndex", () => {
@@ -250,7 +292,7 @@ describe("finishPlanned — dependsOnIndex translation", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: "high",
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it", dependsOnIndex: [0] },
@@ -270,7 +312,7 @@ describe("finishPlanned — dependsOnIndex translation", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: "high",
+      confidence: TEST_CONFIDENCE,
       tickets: [{ title: "first", body: "first body", dependsOnIndex: [0, 1, 5] }],
     };
 
@@ -305,7 +347,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: "high",
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it" },
@@ -325,7 +367,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: "high",
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it", dependsOnIndex: [0] },
@@ -347,7 +389,7 @@ describe("finishPlanned — epic linkage", () => {
     });
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: "high", tickets: [{ title: "a", body: "b" }] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [{ title: "a", body: "b" }] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -360,7 +402,7 @@ describe("finishPlanned — epic linkage", () => {
     vi.mocked(github.findChildIssues).mockResolvedValue([41, 42]);
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: "high", tickets: [{ title: "a", body: "b" }] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [{ title: "a", body: "b" }] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -371,7 +413,7 @@ describe("finishPlanned — epic linkage", () => {
     vi.mocked(github.getIssue).mockResolvedValue(undefined);
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: "high", tickets: [{ title: "a", body: "b" }] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [{ title: "a", body: "b" }] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -386,7 +428,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: "high",
+      confidence: TEST_CONFIDENCE,
       tickets: [
         { title: "add the schema field", body: "add it" },
         { title: "use it in the dashboard", body: "use it" },
@@ -405,7 +447,7 @@ describe("finishPlanned — epic linkage", () => {
   it("does not touch the epic body when no children were filed", async () => {
     const ctx = makeCtx({ config: makeFleetConfig({ projects: [project] }) });
     ctx.state.upsert(record());
-    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: "high", tickets: [] };
+    const result: PlanResult = { status: "completed", summary: "epic summary", confidence: TEST_CONFIDENCE, tickets: [] };
 
     await finishPlanned(ctx, project, planIssue, result);
 
@@ -419,7 +461,7 @@ describe("finishPlanned — epic linkage", () => {
     const result: PlanResult = {
       status: "completed",
       summary: "epic summary",
-      confidence: "high",
+      confidence: TEST_CONFIDENCE,
       tickets: [{ title: "add the schema field", body: "add it" }],
     };
 

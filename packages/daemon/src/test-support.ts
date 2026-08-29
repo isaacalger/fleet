@@ -19,6 +19,15 @@ import type { LoopContext } from "./loop/context.ts";
 import type { ApprovalManager } from "./session/approvals.ts";
 import { HistoryStore, StateStore } from "./store/state.ts";
 
+/**
+ * The confidence every result fixture reports unless a test is specifically
+ * about a low score. Deliberately clear of `makeProject`'s
+ * `confidenceThreshold: 70`, so a test that isn't about the confidence gate
+ * never trips it — and so tuning the default threshold means reasoning about
+ * one number here rather than a wall of bare literals across the suite.
+ */
+export const TEST_CONFIDENCE = 90;
+
 export function makeProject(patch: Partial<ProjectConfig> = {}): ProjectConfig {
   return {
     name: "alpha",
@@ -31,6 +40,9 @@ export function makeProject(patch: Partial<ProjectConfig> = {}): ProjectConfig {
     autoElevateOnFailure: true,
     autoAddressReviews: true,
     machineReview: false,
+    triage: false,
+    confidenceThreshold: 70,
+    triageAutoPromote: true,
     // Off by default here (schema default is true) so the hundreds of
     // existing claim-flow tests using `makeIssue`'s empty body don't all
     // start failing intake lint — opt in per test with `{ intakeLint: true }`.

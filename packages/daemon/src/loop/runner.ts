@@ -1,5 +1,6 @@
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
-import { tierForType, ELEVATE_LABEL, LIGHT_LABEL, PLAN_LABEL, mergeModelUsage, type Effort, type ProjectConfig, type TicketRecord, type Tier } from "@fleet/shared";
+import { tierForType, ELEVATE_LABEL, LIGHT_LABEL, PLAN_LABEL, TRIAGE_LABEL, mergeModelUsage, type Effort, type ProjectConfig, type TicketRecord, type Tier } from "@fleet/shared";
+import { confidenceHoldPreamble } from "./confidence.ts";
 import { key, markWorking, type LoopContext, type SessionBase } from "./context.ts";
 import { reportRunFailure } from "./finish.ts";
 import { readBuildSpec, resolveTypeContract, resolveTypeVerify } from "../github/buildspec.ts";
@@ -233,6 +234,10 @@ export async function resumeTicket(
     let elevated = record.elevated ?? false;
     let light = record.light ?? false;
     let isPlan = record.isPlan ?? false;
+    // Sticky (OR, not overwrite) unlike the tier flags above: the claim removes
+    // `fleet:triage` when it takes the ticket, so re-reading live labels alone
+    // would silently demote a resumed investigation to a code session.
+    let isTriage = record.isTriage ?? false;
     try {
       // One fetch for labels *and* body: the tier labels drive model selection,
       // and the real body keeps per-ticket `Timeout:` overrides working on a
@@ -244,24 +249,39 @@ export async function resumeTicket(
         elevated = live.labels.includes(ELEVATE_LABEL);
         light = live.labels.includes(LIGHT_LABEL);
         isPlan = live.labels.includes(PLAN_LABEL);
+        isTriage = isTriage || live.labels.includes(TRIAGE_LABEL);
       }
     } catch {
       // best-effort; fall back to the recorded flags and an empty body
     }
-    ctx.state.update(project.name, record.issueNumber, { elevated, light, isPlan });
+    if (isPlan) isTriage = false;
+    // `bodyHashAtClaim` is deliberately NOT refreshed here: it has to keep
+    // describing the body the investigation started from, or an edit made while
+    // the session was down would be silently forgiven.
+    ctx.state.update(project.name, record.issueNumber, { elevated, light, isPlan, isTriage });
     await markWorking(ctx, project, record.issueNumber);
     const journal = new Journal(ctx.dataDirPath, project.name, record.issueNumber);
-    journal.append({ type: "fleet", event: "resumed", sessionId: record.sessionId, elevated, light, isPlan, reason });
+    journal.append({ type: "fleet", event: "resumed", sessionId: record.sessionId, elevated, light, isPlan, isTriage, reason });
+    // A confidence hold is the one resume where the operator's text alone is
+    // not enough context: the session remembers its score but not that the
+    // score is why it stopped.
+    // Read from the stamped hold, never inferred from the tail of the trail: an
+    // `overridden` entry also reads as "below threshold" yet was let through, so
+    // inference prepended a hold notice to unrelated later resumes (PR feedback,
+    // a stall nudge). `overridden` is always false on a stamped hold — the gate
+    // only stamps when it actually held — so `waived` stays a caller's opt-in.
+    const heldEntry = record.heldOnConfidence;
+    const firstMessage = heldEntry ? confidenceHoldPreamble(heldEntry, heldEntry.overridden === true) + message : message;
     await runSession(ctx, {
       project,
       issue,
       worktree: { path: record.worktreePath, branch: record.branch },
       journal,
       resumeSessionId: record.sessionId,
-      firstMessage: message,
+      firstMessage,
       elevated,
       light,
-      kind: isPlan ? "plan" : "code",
+      kind: isPlan ? "plan" : isTriage ? "triage" : "code",
       ticketType: record.ticketType,
     });
   } catch (err) {

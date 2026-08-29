@@ -1,6 +1,7 @@
 import { mergeModelUsage, type PlanResult, type ProjectConfig } from "@fleet/shared";
+import { confidenceGate } from "./confidence.ts";
 import { key, markWorking, type LoopContext, type SessionBase } from "./context.ts";
-import { finishBlocked, finishCompleted, finishFailed, finishPlanned } from "./finish.ts";
+import { finishBlocked, finishCompleted, finishFailed, finishPlanned, finishTriaged } from "./finish.ts";
 import { MAX_TICKET_TIMEOUT_MINUTES, getIssueComments, parseTicketTimeoutMinutes, upsertStatusComment, type ReadyIssue } from "../github/github.ts";
 import { Journal } from "../store/journal.ts";
 import { log, logError } from "../log.ts";
@@ -57,7 +58,18 @@ export async function supervise(
 
     if (turn.kind === "plan") {
       if (turn.result?.status === "completed") {
+        const confidence = await confidenceGate(ctx, project, issue.number, "plan", turn.result.confidence);
+        if (confidence.action === "hold") {
+          retireSession(ctx, project, issue.number, session);
+          await finishBlocked(ctx, project, issue, confidence.reason, turn.result.summary);
+          return;
+        }
         const gate = await planReviewGate(ctx, project, issue, worktree, base, turn.result);
+        if (gate.action === "hold") {
+          retireSession(ctx, project, issue.number, session);
+          await finishBlocked(ctx, project, issue, gate.reason, turn.result.summary);
+          return;
+        }
         if (gate.action === "fixing") {
           session.send(gate.prompt);
           continue;
@@ -74,8 +86,36 @@ export async function supervise(
       return;
     }
 
+    if (turn.kind === "triage") {
+      // A blocked triage goes to `finishTriaged` rather than `park`: the spec it
+      // did produce is still worth writing back, and `finishTriaged` already
+      // routes a blocked result to `fleet:needs-input`.
+      if (turn.result?.status === "completed" || turn.result?.status === "blocked") {
+        // `finishTriaged`'s hold path announces a reply-able ticket exactly like
+        // `finishBlocked` does, so it needs the same guard.
+        retireSession(ctx, project, issue.number, session);
+        await finishTriaged(ctx, project, issue, turn.result);
+        return;
+      }
+      await finishFailed(ctx, project, issue, formatTurnError(turn));
+      return;
+    }
+
     if (turn.result?.status === "completed") {
+      // Before the reviewer, not after: a result its own author doesn't trust
+      // isn't worth a reviewer session's tokens.
+      const confidence = await confidenceGate(ctx, project, issue.number, "code", turn.result.confidence);
+      if (confidence.action === "hold") {
+        retireSession(ctx, project, issue.number, session);
+        await finishBlocked(ctx, project, issue, confidence.reason, turn.result.summary);
+        return;
+      }
       const gate = await machineReviewGate(ctx, project, issue, worktree, base, turn.result);
+      if (gate.action === "hold") {
+        retireSession(ctx, project, issue.number, session);
+        await finishBlocked(ctx, project, issue, gate.reason, turn.result.summary);
+        return;
+      }
       if (gate.action === "fixing") {
         session.send(gate.prompt);
         continue;
@@ -91,6 +131,25 @@ export async function supervise(
     await finishFailed(ctx, project, issue, formatTurnError(turn));
     return;
   }
+}
+
+/**
+ * Retire a finished session before its ticket is announced as reply-able.
+ *
+ * `finishBlocked`/`finishTriaged` take two `gh` round trips and a notify to
+ * post the status comment, swap the label, and `emitBoard()`. Left in
+ * `ctx.live` across that window, `ticketCapabilities` still reports
+ * `canReply: true`, and a reply arriving mid-announcement takes `reply()`'s
+ * live-session branch — sending into a session whose results nothing is
+ * consuming and returning `"steered"`, so the dashboard reports success while
+ * the message is discarded. `park()` guards the same hazard with a reply
+ * waiter; a hold has no waiter to park in, so it drops out of `live` instead
+ * and the reply falls through to the cold-resume path (or a clear
+ * mid-transition error while the ticket is still in `running`).
+ */
+function retireSession(ctx: LoopContext, project: ProjectConfig, issueNumber: number, session: WorkerSession): void {
+  session.close();
+  ctx.live.delete(key(project.name, issueNumber));
 }
 
 /**
@@ -188,7 +247,7 @@ export async function machineReviewGate(
   worktree: Worktree,
   base: SessionBase,
   workerReport: { summary: string; prBody?: string },
-): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }> {
+): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }> {
   const scope = key(project.name, issue.number);
   const record = ctx.state.get(project.name, issue.number);
   if (ctx.dryRun || !shouldMachineReview(project, record)) return { action: "proceed" };
@@ -265,6 +324,12 @@ export async function machineReviewGate(
     journal.append({ type: "fleet", event: "machine-review-passed", summary: outcome.result.summary });
     log("loop", `${scope}: machine review passed`);
     ctx.state.update(project.name, issue.number, { machineReviewOutcome: "passed" });
+    // A review the reviewer doesn't trust is exactly when a human should look.
+    // This narrowly inverts the fail-open contract: crashes, timeouts, and
+    // unparseable output above still proceed — only a *completed* review
+    // reporting low confidence in itself holds.
+    const confidence = await confidenceGate(ctx, project, issue.number, "machine-review", outcome.result.confidence);
+    if (confidence.action === "hold") return { action: "hold", reason: confidence.reason };
     return { action: "proceed" };
   }
 
@@ -314,7 +379,7 @@ export async function planReviewGate(
   worktree: Worktree,
   base: SessionBase,
   result: PlanResult,
-): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string }> {
+): Promise<{ action: "proceed" } | { action: "fixing"; prompt: string } | { action: "hold"; reason: string }> {
   const scope = key(project.name, issue.number);
   const record = ctx.state.get(project.name, issue.number);
   if (ctx.dryRun || !shouldReviewPlan(project, record)) return { action: "proceed" };
@@ -369,6 +434,10 @@ export async function planReviewGate(
     journal.append({ type: "fleet", event: "plan-review-passed", summary: outcome.result.summary });
     log("loop", `${scope}: plan review passed`);
     ctx.state.update(project.name, issue.number, { machineReviewOutcome: "passed" });
+    // Same narrow inversion of fail-open as `machineReviewGate`: only a
+    // completed review that distrusts its own verdict holds the children.
+    const confidence = await confidenceGate(ctx, project, issue.number, "plan-review", outcome.result.confidence);
+    if (confidence.action === "hold") return { action: "hold", reason: confidence.reason };
     return { action: "proceed" };
   }
 

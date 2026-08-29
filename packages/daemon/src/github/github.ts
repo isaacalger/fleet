@@ -4,6 +4,7 @@ import {
   FLEET_LABELS,
   PLAN_LABEL,
   PRIORITY_LABELS,
+  TRIAGE_LABEL,
   boardStatusFromLabels,
   priorityOf,
   profileNames,
@@ -13,6 +14,7 @@ import {
   type ProjectConfig,
   type TicketDiffFile,
 } from "@fleet/shared";
+import { createHash } from "node:crypto";
 import { readBuildSpec } from "./buildspec.ts";
 import { run, runJson, runJsonPaginated } from "./exec.ts";
 import { log, logError } from "../log.ts";
@@ -76,7 +78,8 @@ export function priorityRank(labels: string[]): number {
   return index === -1 ? PRIORITY_LABELS.length : index;
 }
 
-export async function listFleetIssues(project: ProjectConfig): Promise<FleetIssue[]> {
+/** Every open issue, mapped to `FleetIssue` shape and unfiltered. One `gh` call, shared by both views below. */
+async function listOpenIssues(project: ProjectConfig): Promise<FleetIssue[]> {
   const issues = await runJson<GhIssueJson[]>("gh", [
     "issue", "list",
     "--repo", project.githubRepo,
@@ -87,18 +90,30 @@ export async function listFleetIssues(project: ProjectConfig): Promise<FleetIssu
   if (issues.length >= 1000) {
     log("github", `WARNING: ${project.githubRepo} returned 1000 open issues — the listing may be truncated and older fleet tickets invisible`);
   }
+  return issues.map((issue) => ({
+    number: issue.number,
+    title: issue.title,
+    body: issue.body ?? "",
+    labels: issue.labels.map((l) => l.name),
+    url: issue.url,
+    author: issue.author?.login ?? "",
+    assignees: issue.assignees.map((a) => a.login),
+  }));
+}
+
+const hasFleetLabel = (issue: FleetIssue): boolean => issue.labels.some((l) => l.startsWith("fleet:"));
+
+export async function listFleetIssues(project: ProjectConfig): Promise<FleetIssue[]> {
+  const issues = await listOpenIssues(project);
   return issues
-    .map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body ?? "",
-      labels: issue.labels.map((l) => l.name),
-      url: issue.url,
-      author: issue.author?.login ?? "",
-      assignees: issue.assignees.map((a) => a.login),
-    }))
-    .filter((issue) => issue.labels.some((l) => l.startsWith("fleet:")))
+    .filter(hasFleetLabel)
     .sort((a, b) => priorityRank(a.labels) - priorityRank(b.labels) || a.number - b.number);
+}
+
+/** Open issues carrying no `fleet:*` label — triage candidates, invisible to the board. */
+export async function listNonFleetIssues(project: ProjectConfig): Promise<FleetIssue[]> {
+  const issues = await listOpenIssues(project);
+  return issues.filter((issue) => !hasFleetLabel(issue)).sort((a, b) => b.number - a.number);
 }
 
 export function toBoardTicket(project: ProjectConfig, issue: FleetIssue, blockedBy: number[] = []): BoardTicket | null {
@@ -115,6 +130,7 @@ export function toBoardTicket(project: ProjectConfig, issue: FleetIssue, blocked
     priority: priorityOf(issue.labels),
     type: typeOf(issue.labels),
     isPlan: issue.labels.includes(PLAN_LABEL),
+    isTriage: issue.labels.includes(TRIAGE_LABEL),
     ...(blockedBy.length > 0 ? { blockedBy } : {}),
     ...(epicNumber !== undefined ? { epicNumber } : {}),
     ...(children.length > 0 ? { epicProgress: { closed: children.filter((c) => c.checked).length, total: children.length } } : {}),
@@ -319,6 +335,69 @@ export async function getIssue(project: ProjectConfig, issueNumber: number): Pro
   }
 }
 
+/** SHA-256 of an issue body, used to detect a concurrent human edit during a triage session. */
+export function hashBody(body: string): string {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+/**
+ * Posts a new, permanent issue comment. Distinct from `upsertStatusComment`,
+ * which maintains the single continuously-overwritten status comment — anything
+ * written there is destroyed by the next status update or heartbeat refresh.
+ */
+export async function createIssueComment(project: ProjectConfig, issueNumber: number, body: string): Promise<void> {
+  await run("gh", [
+    "issue", "comment", String(issueNumber),
+    "--repo", project.githubRepo,
+    "--body-file", "-",
+  ], { stdin: clampBody(body) });
+}
+
+function collisionComment(spec: string): string {
+  return [
+    "⚠️ **Concurrent edit detected.**",
+    "",
+    "The issue body changed while triage was investigating, so the diagnosis may rest on a stale premise.",
+    "The proposed spec is preserved here rather than written into the body:",
+    "",
+    spec,
+  ].join("\n");
+}
+
+/**
+ * Appends a triage spec to the issue body, but only when the body is
+ * byte-identical to what the session was claimed against. A human edit mid-run
+ * makes the agent's premise stale, so the spec is preserved as a standalone
+ * comment instead and the caller forces `fleet:needs-input` regardless of
+ * confidence.
+ *
+ * Detection compares a body hash rather than `updatedAt` deliberately: fleet's
+ * own label swaps, status-comment upserts, and heartbeat refreshes all bump
+ * `updatedAt` during a normal run, so a timestamp check would report a collision
+ * on essentially every triage and make auto-promotion dead code.
+ */
+export async function appendTriageSpecSafely(
+  project: ProjectConfig,
+  issueNumber: number,
+  spec: string,
+  bodyHashAtClaim: string,
+): Promise<"appended" | "commented"> {
+  const current = await getIssue(project, issueNumber);
+  if (!current) {
+    log("github", `triage #${issueNumber}: could not re-read the issue before appending — preserving the spec as a comment`);
+    await createIssueComment(project, issueNumber, collisionComment(spec));
+    return "commented";
+  }
+
+  if (hashBody(current.body) !== bodyHashAtClaim) {
+    await createIssueComment(project, issueNumber, collisionComment(spec));
+    return "commented";
+  }
+
+  await updateIssueBody(project, issueNumber, `${current.body}\n\n${spec}`);
+  return "appended";
+}
+
 /**
  * Issue numbers whose body carries this epic's `Part-of: #<n>` stamp — the
  * GitHub-side "were children already filed?" check `finishPlanned` gates on,
@@ -411,17 +490,85 @@ export function getPushCollaborators(project: ProjectConfig): Promise<Set<string
  * issue with *both* fleet labels (visible on the board, fixable by a human)
  * instead of neither (invisible to every recovery path).
  */
+/**
+ * True only for gh's "the repo has no such label" failure for *this* label —
+ * gh reports it as `'<label>' not found` inside the update error. Deliberately
+ * narrow: a permissions failure or a network blip must not be mistaken for a
+ * missing label and trigger label creation.
+ */
+function isLabelNotFoundError(err: unknown, label: string): boolean {
+  return err instanceof Error && err.message.includes(`'${label}' not found`);
+}
+
+/**
+ * Creates one known fleet label in the repo. Idempotent via `--force`. Narrow
+ * counterpart to `ensureLabels`, which also fetches and reads fleet.yaml and is
+ * therefore only appropriate for the one-off `init-labels` command.
+ */
+async function createFleetLabel(project: ProjectConfig, name: string): Promise<void> {
+  const spec = ALL_FLEET_LABELS.find((l) => l.name === name);
+  if (!spec) {
+    throw new Error(
+      `could not create label "${name}" in ${project.githubRepo} — it is not a known fleet label; `
+      + "run `pnpm daemon init-labels` to create fleet's labels in this repo",
+    );
+  }
+  try {
+    await run("gh", [
+      "label", "create", spec.name,
+      "--repo", project.githubRepo,
+      "--color", spec.color,
+      "--description", spec.description,
+      "--force",
+    ]);
+  } catch (err) {
+    throw new Error(
+      `could not create label "${name}" in ${project.githubRepo} — run \`pnpm daemon init-labels\` `
+      + `to create fleet's labels in this repo (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+}
+
+/**
+ * Self-heals the "label added in a newer fleet release, repo registered before
+ * it" case: any label in `ALL_FLEET_LABELS` that the repo is missing is created
+ * on demand and the edit retried exactly once. No loop — a second not-found
+ * means something else is wrong (permissions, a renamed repo), and quietly
+ * retrying would hide it.
+ */
+export async function addLabel(project: ProjectConfig, issueNumber: number, label: string): Promise<void> {
+  const args = [
+    "issue", "edit", String(issueNumber),
+    "--repo", project.githubRepo,
+    "--add-label", label,
+  ];
+  try {
+    await run("gh", args);
+  } catch (err) {
+    if (!isLabelNotFoundError(err, label)) throw err;
+    log("github", `${project.githubRepo}: label "${label}" is missing — creating it and retrying`);
+    await createFleetLabel(project, label);
+    await run("gh", args);
+  }
+}
+
+/**
+ * Remove a label. Unlike `addLabel` there is nothing to self-heal — a label
+ * that doesn't exist can't be attached — so failures propagate, which is what
+ * lets the confidence gate fail closed when it can't consume an override.
+ */
+export async function removeLabel(project: ProjectConfig, issueNumber: number, label: string): Promise<void> {
+  await run("gh", [
+    "issue", "edit", String(issueNumber),
+    "--repo", project.githubRepo,
+    "--remove-label", label,
+  ]);
+}
+
 export async function swapLabel(project: ProjectConfig, issueNumber: number, from: string, to: string): Promise<void> {
-  await run("gh", [
-    "issue", "edit", String(issueNumber),
-    "--repo", project.githubRepo,
-    "--add-label", to,
-  ]);
-  await run("gh", [
-    "issue", "edit", String(issueNumber),
-    "--repo", project.githubRepo,
-    "--remove-label", from,
-  ]);
+  // Via `addLabel` so the add half self-heals a label the repo predates too.
+  await addLabel(project, issueNumber, to);
+  await removeLabel(project, issueNumber, from);
 }
 
 /**
@@ -461,6 +608,28 @@ export function readyLabelArgs(project: ProjectConfig, issueNumber: number): str
 
 export async function markReady(project: ProjectConfig, issueNumber: number): Promise<void> {
   await run("gh", readyLabelArgs(project, issueNumber));
+}
+
+/**
+ * The triage counterpart of `readyLabelArgs`: put an issue back in the queue as
+ * an *investigation* rather than as work. Claiming a triage consumes
+ * `fleet:triage` (see `processTicket`), so every "requeue this ticket" path
+ * would otherwise hand a still-undiagnosed issue to a coding session. This also
+ * removes `fleet:ready` — the one label `readyLabelArgs` never has to clear —
+ * because leaving both on would make the next claim compute `isReady` first and
+ * run code anyway.
+ */
+export function triageLabelArgs(project: ProjectConfig, issueNumber: number): string[] {
+  const args = ["issue", "edit", String(issueNumber), "--repo", project.githubRepo];
+  for (const label of [FLEET_LABELS.inProgress, FLEET_LABELS.needsInput, FLEET_LABELS.review, FLEET_LABELS.ready]) {
+    args.push("--remove-label", label);
+  }
+  args.push("--add-label", TRIAGE_LABEL);
+  return args;
+}
+
+export async function markTriage(project: ProjectConfig, issueNumber: number): Promise<void> {
+  await run("gh", triageLabelArgs(project, issueNumber));
 }
 
 /**

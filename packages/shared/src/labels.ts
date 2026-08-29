@@ -15,6 +15,11 @@ export const LIGHT_LABEL = "fleet:light";
 
 export const PLAN_LABEL = "fleet:plan";
 
+export const TRIAGE_LABEL = "fleet:triage";
+
+/** Operator escape hatch for a confidence hold. Single-use: the gate removes it as it consumes it. */
+export const CONFIDENCE_OVERRIDE_LABEL = "fleet:confidence-overridden";
+
 /** Prefix for the per-repo, fleet.yaml-declared setup-profile labels — never added to `ALL_FLEET_LABELS` since these are per-repo, not global. */
 export const FLEET_TYPE_LABEL_PREFIX = "fleet:type:";
 
@@ -36,6 +41,8 @@ export const ALL_FLEET_LABELS: { name: string; color: string; description: strin
   { name: ELEVATE_LABEL, color: "5319e7", description: "Run this ticket on the project's elevated model" },
   { name: LIGHT_LABEL, color: "bfd4f2", description: "Run this ticket on the project's light model" },
   { name: PLAN_LABEL, color: "c2e0c6", description: "Decompose this epic into child tickets instead of coding it" },
+  { name: TRIAGE_LABEL, color: "006b75", description: "Investigate this issue with a read-only triage session and produce a spec" },
+  { name: CONFIDENCE_OVERRIDE_LABEL, color: "e99695", description: "Carry this ticket past one confidence gate — removed as soon as it is used" },
   { name: "fleet:p1", color: "b60205", description: "Highest priority" },
   { name: "fleet:p2", color: "d93f0b", description: "Medium priority" },
   { name: "fleet:p3", color: "fef2c0", description: "Low priority" },
@@ -46,6 +53,10 @@ export function boardStatusFromLabels(labels: string[]): BoardStatus | null {
   if (labels.includes(FLEET_LABELS.inProgress)) return "in-progress";
   if (labels.includes(FLEET_LABELS.needsInput)) return "needs-input";
   if (labels.includes(FLEET_LABELS.review)) return "review";
+  // Last, so it can never shadow a more specific state: an issue mid-claim
+  // briefly carries both `fleet:triage` and `fleet:in-progress`, and a triage
+  // that has been picked up must read as in-progress, not ready.
+  if (labels.includes(TRIAGE_LABEL)) return "ready";
   return null;
 }
 
