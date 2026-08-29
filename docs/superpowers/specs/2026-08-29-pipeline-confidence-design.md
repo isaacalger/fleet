@@ -2,7 +2,8 @@
 
 Every scored fleet session reports a calibrated 0–100 confidence. The score is
 persisted as an append-only trail on the ticket, shown at the top of the
-dashboard detail panel, and gates progress: a session scoring below the
+dashboard detail panel and on every board card including the Done column, and
+gates progress: a session scoring below the
 project's threshold stops the ticket in the needs-attention bucket instead of
 pushing, opening a PR, or filing child tickets.
 
@@ -62,10 +63,19 @@ export type ConfidenceStage =
 
 export interface ConfidenceEntry {
   stage: ConfidenceStage;
-  score: number;   // 0-100
-  at: string;      // ISO timestamp
+  score: number;      // 0-100
+  threshold: number;  // the project's threshold when this score was recorded
+  at: string;         // ISO timestamp
 }
 ```
+
+`threshold` is stamped onto the entry at write time rather than looked up at
+render time. A Done-column card shows a ticket that closed long ago, whose
+project may since have changed its `confidenceThreshold` or been removed from
+config entirely (`issueUrl` in `loop/board.ts:11-18` already handles that case
+for URLs). Stamping makes every entry self-describing, so the same rendering
+code colors live and archived tickets correctly with no config lookup on the
+client at all.
 
 and `TicketRecord` gains `confidenceHistory?: ConfidenceEntry[]` (absent on
 records predating this field).
@@ -78,7 +88,9 @@ optional field is purely a TypeScript change, written via
 `triageConfidence` is retained unchanged. Triage writes both it and a
 `confidenceHistory` entry. The small duplication is deliberate: the existing
 auto-promote comparison and its tests keep reading the field they already read,
-so this change cannot regress triage behavior.
+so this change cannot regress triage behavior. A triage entry stamps
+`triageAutoPromoteThreshold` as its `threshold`, since that is the bar that
+score was actually judged against.
 
 Entries are appended, never replaced. A machine-review fix round or an operator
 restart therefore leaves a visible trajectory rather than overwriting history —
@@ -149,21 +161,34 @@ today.
 
 ### 5. Dashboard
 
-`packages/dashboard/src/components/TicketDetail.vue`: a confidence badge in the
-header block, immediately above the meta row at `:306`. It renders the most
-recent entry as `Code 91%`, colored against the threshold — at or above is
-green, below is red. Clicking the badge expands the full trail in order:
-`Triage 88% → Code 91% → Review 74%`. A ticket with no `confidenceHistory`
-renders no badge.
+No new plumbing is needed for either surface. `getBoard` attaches the whole
+`TicketRecord` to active tickets (`loop/board.ts:50-56`) and
+`synthesizeDoneTickets` attaches the `ClosedTicketRecord` — which extends
+`TicketRecord` — to Done ones (`loop/board.ts:44`). So `confidenceHistory`
+reaches every card and the detail panel already, and each entry carries its own
+threshold. `BoardTicket` is unchanged.
 
-The threshold reaches the client as a new `confidenceThreshold: number` field on
-the `TicketDetail` interface in `packages/shared/src/board.ts:237-244`,
-populated by the daemon's ticket endpoint from project config. The history
-itself needs no new plumbing: `getBoard` already attaches the whole
-`TicketRecord` (`loop/board.ts:50-56`).
+A shared `ConfidenceBadge.vue` renders one entry in two sizes, so the color
+rule and the score formatting live in one place:
 
-`BoardTicket` and `TicketCard.vue` are unchanged — the badge lives in the detail
-panel only.
+- **at or above** its stamped `threshold` — green
+- **below** — red
+
+`packages/dashboard/src/components/TicketDetail.vue`: the badge in the header
+block, immediately above the meta row at `:306`, showing the most recent entry
+labeled with its stage (`Code 91%`). Clicking it expands the full trail in
+order: `Triage 88% → Code 91% → Review 74%`.
+
+`packages/dashboard/src/components/TicketCard.vue`: the compact badge alongside
+the existing plan/triage badges at `:91-92`, showing the latest entry's score
+only (`91%`) — the card is dense and the stage is largely implied by the column.
+This applies to every column, Done included: a closed ticket's badge is the last
+score it ever recorded, which is the "how sure was the agent about the thing
+that shipped?" number.
+
+A ticket with no `confidenceHistory` renders no badge on either surface — this
+is the normal state for every ticket predating the field, so both surfaces must
+degrade silently rather than showing a zero or a placeholder.
 
 ### 6. Testing
 
@@ -177,8 +202,13 @@ panel only.
   above threshold proceeds normally; below threshold holds, applies
   `fleet:needs-input`, and asserts nothing was pushed, no PR opened, and for the
   plan path no child issues filed.
-- A `TicketDetail` render test: badge shows the latest entry, color flips across
-  the threshold, expansion lists the whole trail, absent history renders nothing.
+- A `ConfidenceBadge` render test: color flips across the stamped threshold,
+  including the boundary (equal to threshold renders green).
+- A `TicketDetail` render test: badge shows the latest entry with its stage,
+  expansion lists the whole trail, absent history renders nothing.
+- A `TicketCard` render test: compact badge shows the latest score, absent
+  history renders nothing, and a synthesized Done-column ticket built from a
+  `ClosedTicketRecord` renders its badge.
 
 Fixtures come from `packages/daemon/src/test-support.ts` per the `write-tests`
 skill.
@@ -188,7 +218,9 @@ daemon run per the `verify` skill.
 
 ## Out of scope
 
-- Confidence on board cards or in the Done column.
+- A confidence column in the history table (`HistoryRecord`) or any cross-ticket
+  confidence rollup in `HistoryAggregates`. The Done-column *cards* are in
+  scope; the separate history view's table and aggregates are not.
 - Any retry or self-correction round driven by a low score. Below-threshold
   holds and waits for a human; the machine-review gate's existing one-shot fix
   round is unchanged.
