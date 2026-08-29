@@ -47,19 +47,26 @@ and the status-comment interpolation formats as `N%`.
 
 #### Transitional string coercion
 
+The coercion lives **outside** the schema, applied to a session's raw
+structured output before it reaches zod:
+
 ```ts
-/**
- * TRANSITIONAL: accepts the pre-#NNN `low|medium|high` strings and maps them
- * onto the 0-100 scale. Remove once no resumable session predates the change
- * (safely: one full ticket-lifetime after deploy).
- */
-export const ConfidenceScoreSchema = z.union([
-  z.number().int().min(0).max(100),
-  z.enum(["low", "medium", "high"]).transform((v) =>
-    v === "high" ? 90 : v === "medium" ? 60 : 30,
-  ),
-]);
+export const ConfidenceScoreSchema = z.number().int().min(0).max(100);
+
+/** TRANSITIONAL: maps the pre-migration `low|medium|high` strings onto the 0-100 scale. */
+export function normalizeLegacyConfidence<T>(raw: T): T { /* … */ }
 ```
+
+It cannot live in the schema. A `z.union` or `z.transform` makes
+`z.toJSONSchema` throw `Transforms cannot be represented in JSON Schema`, and
+the daemon builds its `outputFormat` from these schemas at **module load**
+(`WORKER_OUTPUT_SCHEMA`/`PLAN_OUTPUT_SCHEMA` at `session/worker.ts:32-42`,
+`MACHINE_REVIEW_OUTPUT_SCHEMA`/`PLAN_REVIEW_OUTPUT_SCHEMA` at
+`session/review.ts:17-22`) — so a union stops the daemon booting rather than
+failing a typecheck. Converting with `io: "input"` avoids the throw but
+advertises `low|medium|high` to the model as valid output, contradicting the
+prompt change above. Normalizing at the parse boundary keeps the advertised
+schema honest while still rescuing legacy sessions.
 
 This is not a rare edge case, it is the common path on the deploy itself.
 Deploying requires a daemon restart; restart reconciles running tickets to

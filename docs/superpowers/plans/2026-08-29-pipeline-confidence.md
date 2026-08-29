@@ -74,14 +74,23 @@ describe("ConfidenceScoreSchema", () => {
     expect(ConfidenceScoreSchema.safeParse(72.5).success).toBe(false);
   });
 
-  it("coerces the legacy low/medium/high strings", () => {
-    expect(ConfidenceScoreSchema.parse("low")).toBe(30);
-    expect(ConfidenceScoreSchema.parse("medium")).toBe(60);
-    expect(ConfidenceScoreSchema.parse("high")).toBe(90);
+  it("rejects strings, including the legacy values", () => {
+    expect(ConfidenceScoreSchema.safeParse("high").success).toBe(false);
+    expect(ConfidenceScoreSchema.safeParse("very high").success).toBe(false);
+  });
+});
+
+describe("normalizeLegacyConfidence", () => {
+  it("maps each legacy string onto the scale", () => {
+    expect(normalizeLegacyConfidence({ confidence: "low" })).toEqual({ confidence: 30 });
+    expect(normalizeLegacyConfidence({ confidence: "medium" })).toEqual({ confidence: 60 });
+    expect(normalizeLegacyConfidence({ confidence: "high" })).toEqual({ confidence: 90 });
   });
 
-  it("rejects any other string", () => {
-    expect(ConfidenceScoreSchema.safeParse("very high").success).toBe(false);
+  it("passes through numbers, non-objects, and objects with no confidence", () => {
+    expect(normalizeLegacyConfidence({ confidence: 72 })).toEqual({ confidence: 72 });
+    expect(normalizeLegacyConfidence(null)).toBeNull();
+    expect(normalizeLegacyConfidence({ summary: "x" })).toEqual({ summary: "x" });
   });
 });
 
@@ -96,8 +105,9 @@ describe("confidence on the result contracts", () => {
     expect(WorkerResultSchema.parse({ ...worker, confidence: 88 }).confidence).toBe(88);
   });
 
-  it("coerces a legacy worker confidence from a pre-migration session", () => {
-    expect(WorkerResultSchema.parse({ ...worker, confidence: "high" }).confidence).toBe(90);
+  it("parses a legacy worker confidence once normalized", () => {
+    const raw = normalizeLegacyConfidence({ ...worker, confidence: "high" });
+    expect(WorkerResultSchema.parse(raw).confidence).toBe(90);
   });
 
   it("requires confidence on a machine review result", () => {
@@ -118,23 +128,44 @@ Expected: FAIL — `ConfidenceScoreSchema is not exported` / `No "ConfidenceScor
 At the top of `packages/shared/src/contracts.ts`, after the `zod` import:
 
 ```ts
-/**
- * A calibrated 0-100 confidence percentage.
- *
- * TRANSITIONAL: the string arm accepts the pre-migration `low|medium|high`
- * values. This is not a rare edge case — deploying requires a daemon restart,
- * restart reconciles running tickets to `stalled`, and `recoverStalled` then
- * resumes each one into its *existing* SDK session, whose context still
- * contains the old instruction. Without this arm those sessions fail
- * `safeParse` in worker.ts, which is neither a crash nor `blocked` but an
- * errored turn — burning the ticket's once-only auto-elevate on a retry that
- * cannot succeed. Remove one full ticket-lifetime after deploy.
- */
-export const ConfidenceScoreSchema = z.union([
-  z.number().int().min(0).max(100),
-  z.enum(["low", "medium", "high"]).transform((v) => (v === "high" ? 90 : v === "medium" ? 60 : 30)),
-]);
+/** A calibrated 0-100 confidence percentage. */
+export const ConfidenceScoreSchema = z.number().int().min(0).max(100);
 ```
+
+The legacy-string coercion must NOT go in the schema. A `z.union`/`z.transform`
+makes `z.toJSONSchema` throw `Transforms cannot be represented in JSON Schema`,
+and the daemon builds `outputFormat` from these schemas at **module load**
+(`worker.ts:32-42`, `review.ts:17-22`) — so it stops the daemon booting rather
+than failing a typecheck. Converting with `io: "input"` dodges the throw but
+advertises `low|medium|high` to the model, contradicting Task 10. Normalize at
+the parse boundary instead:
+
+```ts
+/**
+ * TRANSITIONAL: maps the pre-migration `low|medium|high` confidence strings
+ * onto the 0-100 scale, applied to a session's raw structured output *before*
+ * it reaches zod. Lives outside the schema because a union/transform there is
+ * unrepresentable in JSON Schema (see above).
+ *
+ * Not a rare edge case: deploying requires a daemon restart, restart
+ * reconciles running tickets to `stalled`, and `recoverStalled` resumes each
+ * into its *existing* SDK session, whose context still contains the old
+ * instruction. An unparseable result is an errored turn that burns the
+ * ticket's once-only auto-elevate on a retry that cannot succeed.
+ *
+ * Remove one full ticket-lifetime after deploy.
+ */
+export function normalizeLegacyConfidence<T>(raw: T): T {
+  if (raw === null || typeof raw !== "object" || !("confidence" in raw)) return raw;
+  const { confidence } = raw as { confidence: unknown };
+  if (confidence !== "low" && confidence !== "medium" && confidence !== "high") return raw;
+  return { ...raw, confidence: confidence === "high" ? 90 : confidence === "medium" ? 60 : 30 };
+}
+```
+
+Apply it at every confidence-bearing `safeParse`: the `structured_output` block
+in `session/worker.ts:502-518` and both reviewer parses in `session/review.ts`
+— `Schema.safeParse(normalizeLegacyConfidence(structuredOutput))`.
 
 In `WorkerResultSchema`, replace the `confidence` line with:
 
@@ -160,6 +191,26 @@ In `PlanReviewResultSchema`, add the same field with `"...expressing how confide
 
 Run: `pnpm vitest run --root . packages/shared -t "Confidence" && pnpm typecheck`
 Expected: PASS. Typecheck will now FAIL in `packages/daemon` on `confidence: string` — that is expected and fixed in Task 6. Note the failures and continue.
+
+- [ ] **Step 4b: Add a regression guard for the JSON Schema conversion**
+
+The daemon builds its `outputFormat` from these schemas at module load, so a
+schema that can't convert doesn't fail a typecheck — it stops the daemon
+booting, and every `session/*.test.ts` file fails at collection. Lock that down
+in `packages/shared/src/index.test.ts`:
+
+```ts
+it("every result schema converts to JSON Schema for the SDK outputFormat", () => {
+  for (const schema of [WorkerResultSchema, PlanResultSchema, MachineReviewResultSchema, PlanReviewResultSchema, TriageResultSchema]) {
+    expect(() => z.toJSONSchema(schema)).not.toThrow();
+  }
+});
+```
+
+Run: `pnpm vitest run --root . packages/daemon/src/session`
+Expected: all 11 files collect. If any fail at collection with "Transforms
+cannot be represented in JSON Schema", a transform has leaked back into a
+schema — fix it there, not at the conversion call site.
 
 - [ ] **Step 5: Commit**
 
@@ -1312,6 +1363,6 @@ git push fork design/fleet-triage
 
 ## Post-merge follow-up
 
-Delete the transitional string arm of `ConfidenceScoreSchema` and its test once no resumable session predates the change — one full ticket lifetime after deploy. Leaving it is not harmful, but it silently accepts output from a prompt that no longer exists, which will confuse the next reader.
+Delete `normalizeLegacyConfidence`, its call sites, and its tests once no resumable session predates the change — one full ticket lifetime after deploy. Leaving it is not harmful, but it silently accepts output from a prompt that no longer exists, which will confuse the next reader.
 
 Delete the `triageAutoPromoteThreshold` removal shim from `ProjectConfigSchema` on the same schedule, once every live `fleet.config.json` has been migrated.
