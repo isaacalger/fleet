@@ -1,4 +1,5 @@
 import { mergeModelUsage, type PlanResult, type ProjectConfig } from "@fleet/shared";
+import { confidenceGate } from "./confidence.ts";
 import { key, markWorking, type LoopContext, type SessionBase } from "./context.ts";
 import { finishBlocked, finishCompleted, finishFailed, finishPlanned, finishTriaged } from "./finish.ts";
 import { MAX_TICKET_TIMEOUT_MINUTES, getIssueComments, parseTicketTimeoutMinutes, upsertStatusComment, type ReadyIssue } from "../github/github.ts";
@@ -87,6 +88,13 @@ export async function supervise(
     }
 
     if (turn.result?.status === "completed") {
+      // Before the reviewer, not after: a result its own author doesn't trust
+      // isn't worth a reviewer session's tokens.
+      const confidence = await confidenceGate(ctx, project, issue.number, "code", turn.result.confidence);
+      if (confidence.action === "hold") {
+        await finishBlocked(ctx, project, issue, confidence.reason, turn.result.summary);
+        return;
+      }
       const gate = await machineReviewGate(ctx, project, issue, worktree, base, turn.result);
       if (gate.action === "fixing") {
         session.send(gate.prompt);
