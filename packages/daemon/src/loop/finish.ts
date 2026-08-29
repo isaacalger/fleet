@@ -408,7 +408,16 @@ export async function finishBlocked(
     await upsertStatusComment(
       project,
       issue.number,
-      [`**Status: needs input**`, summary ?? "", `Blocked on: ${reason}`, "Reply from the fleet dashboard to continue."].filter(Boolean).join("\n\n"),
+      [
+        `**Status: needs input**`,
+        summary ?? "",
+        `Blocked on: ${reason}`,
+        "Reply from the fleet dashboard to continue.",
+        // Confidence holds land here with real work already committed locally,
+        // and nothing else says where it went. Hedged because a ticket blocked
+        // before it wrote anything reaches this same comment.
+        "Any commits this session made are still local to its worktree and were never pushed. A reply resumes on top of them; **Restart**, or re-labeling the issue `fleet:ready`, rebuilds the worktree from scratch and discards them.",
+      ].filter(Boolean).join("\n\n"),
     );
   } catch (err) {
     logError("loop", `${blockedScope}: could not post the needs-input status comment`, err);

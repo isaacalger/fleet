@@ -61,6 +61,14 @@ export interface TicketRecord {
   triageConfidence?: number;
   /** Append-only trail of every scored session on this ticket, oldest first. Absent on records predating this field. */
   confidenceHistory?: ConfidenceEntry[];
+  /**
+   * The entry that caused the current hold, cleared once the ticket moves on
+   * (any gate that proceeds, and any fresh claim). Stamped explicitly rather
+   * than inferred from `confidenceHistory.at(-1)`, which cannot distinguish a
+   * live hold from an overridden entry the gate already let through, nor say
+   * which stage's session is the one being resumed.
+   */
+  heldOnConfidence?: ConfidenceEntry;
   /** Set once this ticket has auto-retried on the elevated model after a failure — caps escalation to once, ever. */
   autoElevated?: boolean;
   /** The epic issue number this ticket was filed under, parsed from its `Part-of: #<epic>` body line at claim time. */

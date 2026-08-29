@@ -415,9 +415,13 @@ describe("resuming a triage ticket", () => {
 });
 
 describe("resuming a confidence-held ticket", () => {
-  async function resumeWith(confidenceHistory: ConfidenceEntry[] | undefined): Promise<string> {
+  /** Drives the preamble off the stamped hold — never the trail, which is the bug this replaced. */
+  async function resumeWith(
+    heldOnConfidence: ConfidenceEntry | undefined,
+    confidenceHistory?: ConfidenceEntry[],
+  ): Promise<string> {
     const ctx = makeCtx();
-    ctx.state.upsert(makeRecord({ issueNumber: 7, sessionId: "sess-1", confidenceHistory }));
+    ctx.state.upsert(makeRecord({ issueNumber: 7, sessionId: "sess-1", heldOnConfidence, confidenceHistory }));
 
     await resumeTicket(ctx, makeProject(), ctx.state.get("alpha", 7)!, "have another look");
 
@@ -433,33 +437,41 @@ describe("resuming a confidence-held ticket", () => {
   });
 
   it("explains the hold ahead of the operator's own message", async () => {
-    const message = await resumeWith([entry({})]);
+    const message = await resumeWith(entry({}));
 
     expect(message).toContain("65%");
     expect(message).toContain("have another look");
   });
 
   it("explains a hold that had no threshold to clear at all", async () => {
-    const message = await resumeWith([entry({ stage: "triage", score: 95, threshold: null })]);
+    const message = await resumeWith(entry({ stage: "triage", score: 95, threshold: null }));
 
     expect(message).toContain("auto-promotion is disabled");
     expect(message).toContain("have another look");
   });
 
-  it("tells a waived session not to re-litigate its score", async () => {
-    const message = await resumeWith([entry({ overridden: true })]);
+  it("never blames the worker for a reviewer's own low confidence", async () => {
+    const message = await resumeWith(entry({ stage: "machine-review", score: 55 }));
 
-    expect(message).toContain("waived that gate");
+    expect(message).toContain("an automated review of your work");
+    expect(message).not.toContain("your machine-review confidence");
+    expect(message).toContain("have another look");
+  });
+
+  it("says nothing when an overridden entry is merely the newest in the trail", async () => {
+    const message = await resumeWith(undefined, [entry({ overridden: true })]);
+
+    expect(message).toBe("have another look");
   });
 
   it("sends a passing session's message unchanged", async () => {
-    const message = await resumeWith([entry({ score: 91 })]);
+    const message = await resumeWith(undefined, [entry({ score: 91 })]);
 
     expect(message).toBe("have another look");
   });
 
   it("sends a pre-confidence ticket's message unchanged", async () => {
-    const message = await resumeWith(undefined);
+    const message = await resumeWith(undefined, undefined);
 
     expect(message).toBe("have another look");
   });

@@ -265,12 +265,13 @@ export async function resumeTicket(
     // A confidence hold is the one resume where the operator's text alone is
     // not enough context: the session remembers its score but not that the
     // score is why it stopped.
-    const lastEntry = record.confidenceHistory?.at(-1);
-    const heldOnConfidence =
-      lastEntry !== undefined && (lastEntry.threshold === null || lastEntry.score < lastEntry.threshold);
-    const firstMessage = heldOnConfidence
-      ? confidenceHoldPreamble(lastEntry, lastEntry.overridden === true) + message
-      : message;
+    // Read from the stamped hold, never inferred from the tail of the trail: an
+    // `overridden` entry also reads as "below threshold" yet was let through, so
+    // inference prepended a hold notice to unrelated later resumes (PR feedback,
+    // a stall nudge). `overridden` is always false on a stamped hold — the gate
+    // only stamps when it actually held — so `waived` stays a caller's opt-in.
+    const heldEntry = record.heldOnConfidence;
+    const firstMessage = heldEntry ? confidenceHoldPreamble(heldEntry, heldEntry.overridden === true) + message : message;
     await runSession(ctx, {
       project,
       issue,

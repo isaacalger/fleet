@@ -196,3 +196,36 @@ describe("supervise confidence gate — plan and reviewer stages", () => {
     expect(finish.finishBlocked).not.toHaveBeenCalled();
   });
 });
+
+describe("a reply racing a confidence hold", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(github.getIssue).mockResolvedValue(undefined);
+  });
+
+  it("is never reported as steered into the session being retired", async () => {
+    const { reply } = await import("./operator.ts");
+    const ctx = codeCtx();
+    const scope = "alpha#7";
+    const session = fakeSession({ kind: "code", result: { status: "completed", summary: "s", confidence: 40 } });
+    // The live map and the in-flight map as `runSession`/`track` leave them
+    // while supervise is mid-turn.
+    ctx.live.set(scope, session);
+    ctx.running.set(scope, Promise.resolve());
+
+    // Fired from inside the announcement — the exact window `finishBlocked`'s
+    // two gh round trips leave open.
+    let raced: Promise<unknown> | undefined;
+    vi.mocked(finish.finishBlocked).mockImplementation(async () => {
+      raced = reply(ctx, "alpha", 7, "actually, do X instead").catch((err: Error) => err);
+      await raced;
+    });
+
+    await supervise(ctx, makeProject({ confidenceThreshold: 70 }), makeIssue(7, ["fleet:in-progress"]), worktree, session, base);
+
+    expect(await raced).toBeInstanceOf(Error);
+    expect(String(await raced)).toContain("mid-transition");
+    expect((session as unknown as { send: ReturnType<typeof vi.fn> }).send).not.toHaveBeenCalled();
+    expect(ctx.live.has(scope)).toBe(false);
+  });
+});

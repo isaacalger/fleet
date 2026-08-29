@@ -60,11 +60,13 @@ export async function supervise(
       if (turn.result?.status === "completed") {
         const confidence = await confidenceGate(ctx, project, issue.number, "plan", turn.result.confidence);
         if (confidence.action === "hold") {
+          retireSession(ctx, project, issue.number, session);
           await finishBlocked(ctx, project, issue, confidence.reason, turn.result.summary);
           return;
         }
         const gate = await planReviewGate(ctx, project, issue, worktree, base, turn.result);
         if (gate.action === "hold") {
+          retireSession(ctx, project, issue.number, session);
           await finishBlocked(ctx, project, issue, gate.reason, turn.result.summary);
           return;
         }
@@ -89,6 +91,9 @@ export async function supervise(
       // did produce is still worth writing back, and `finishTriaged` already
       // routes a blocked result to `fleet:needs-input`.
       if (turn.result?.status === "completed" || turn.result?.status === "blocked") {
+        // `finishTriaged`'s hold path announces a reply-able ticket exactly like
+        // `finishBlocked` does, so it needs the same guard.
+        retireSession(ctx, project, issue.number, session);
         await finishTriaged(ctx, project, issue, turn.result);
         return;
       }
@@ -101,11 +106,13 @@ export async function supervise(
       // isn't worth a reviewer session's tokens.
       const confidence = await confidenceGate(ctx, project, issue.number, "code", turn.result.confidence);
       if (confidence.action === "hold") {
+        retireSession(ctx, project, issue.number, session);
         await finishBlocked(ctx, project, issue, confidence.reason, turn.result.summary);
         return;
       }
       const gate = await machineReviewGate(ctx, project, issue, worktree, base, turn.result);
       if (gate.action === "hold") {
+        retireSession(ctx, project, issue.number, session);
         await finishBlocked(ctx, project, issue, gate.reason, turn.result.summary);
         return;
       }
@@ -124,6 +131,25 @@ export async function supervise(
     await finishFailed(ctx, project, issue, formatTurnError(turn));
     return;
   }
+}
+
+/**
+ * Retire a finished session before its ticket is announced as reply-able.
+ *
+ * `finishBlocked`/`finishTriaged` take two `gh` round trips and a notify to
+ * post the status comment, swap the label, and `emitBoard()`. Left in
+ * `ctx.live` across that window, `ticketCapabilities` still reports
+ * `canReply: true`, and a reply arriving mid-announcement takes `reply()`'s
+ * live-session branch — sending into a session whose results nothing is
+ * consuming and returning `"steered"`, so the dashboard reports success while
+ * the message is discarded. `park()` guards the same hazard with a reply
+ * waiter; a hold has no waiter to park in, so it drops out of `live` instead
+ * and the reply falls through to the cold-resume path (or a clear
+ * mid-transition error while the ticket is still in `running`).
+ */
+function retireSession(ctx: LoopContext, project: ProjectConfig, issueNumber: number, session: WorkerSession): void {
+  session.close();
+  ctx.live.delete(key(project.name, issueNumber));
 }
 
 /**

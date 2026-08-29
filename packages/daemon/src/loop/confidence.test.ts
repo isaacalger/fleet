@@ -66,7 +66,61 @@ describe("confidenceGate", () => {
     const result = await confidenceGate(ctx, makeProject({ confidenceThreshold: 70 }), 62, "code", 70);
 
     expect(result.action).toBe("proceed");
+    expect(ctx.state.get("alpha", 62)?.heldOnConfidence).toBeUndefined();
+  });
+
+  it("consumes an override even on a passing score, so it cannot carry a later stage", async () => {
+    const ctx = ctxWithTicket();
+    vi.mocked(github.getIssue).mockResolvedValue(issueWith([CONFIDENCE_OVERRIDE_LABEL]));
+
+    const result = await confidenceGate(ctx, makeProject({ confidenceThreshold: 70 }), 62, "code", 91);
+
+    expect(result.action).toBe("proceed");
+    expect(github.removeLabel).toHaveBeenCalledWith(expect.anything(), 62, CONFIDENCE_OVERRIDE_LABEL);
+    // Cleanup, not a waiver — the score never needed carrying.
+    expect(ctx.state.get("alpha", 62)?.confidenceHistory?.[0]).not.toHaveProperty("overridden");
+  });
+
+  it("still proceeds when consuming the override fails on a passing score", async () => {
+    const ctx = ctxWithTicket();
+    vi.mocked(github.getIssue).mockRejectedValueOnce(new Error("gh down"));
+
+    const result = await confidenceGate(ctx, makeProject({ confidenceThreshold: 70 }), 62, "code", 91);
+
+    expect(result.action).toBe("proceed");
+    expect(ctx.state.get("alpha", 62)?.heldOnConfidence).toBeUndefined();
+  });
+
+  it("stamps the hold on the record, and clears it once a later gate passes", async () => {
+    const ctx = ctxWithTicket();
+
+    await confidenceGate(ctx, makeProject({ confidenceThreshold: 70 }), 62, "code", 40);
+    expect(ctx.state.get("alpha", 62)?.heldOnConfidence).toMatchObject({ stage: "code", score: 40 });
+
+    await confidenceGate(ctx, makeProject({ confidenceThreshold: 70 }), 62, "code", 91);
+    expect(ctx.state.get("alpha", 62)?.heldOnConfidence).toBeUndefined();
+  });
+
+  it("never stamps a hold for a score an override carried through", async () => {
+    const ctx = ctxWithTicket();
+    vi.mocked(github.getIssue).mockResolvedValue(issueWith([CONFIDENCE_OVERRIDE_LABEL]));
+
+    const result = await confidenceGate(ctx, makeProject(), 62, "code", 10);
+
+    expect(result.action).toBe("proceed");
+    expect(ctx.state.get("alpha", 62)?.heldOnConfidence).toBeUndefined();
+  });
+
+  it("decides on score alone in dry-run, never touching the override label", async () => {
+    const ctx = makeCtx({ dryRun: true });
+    ctx.state.upsert(makeRecord());
+    vi.mocked(github.getIssue).mockResolvedValue(issueWith([CONFIDENCE_OVERRIDE_LABEL]));
+
+    const result = await confidenceGate(ctx, makeProject({ confidenceThreshold: 70 }), 62, "code", 40);
+
+    expect(result.action).toBe("hold");
     expect(github.getIssue).not.toHaveBeenCalled();
+    expect(github.removeLabel).not.toHaveBeenCalled();
   });
 
   it("holds below the threshold and still records the score against the real threshold", async () => {

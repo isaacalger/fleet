@@ -235,6 +235,10 @@ export async function resetForFreshClaim(
     sessionLive: false,
     autoResumed: false,
     machineReviewOutcome: undefined,
+    // `confidenceHistory` stays — it is history, and that is the point. The
+    // *hold* does not: the work that earned it is about to be discarded, so
+    // quoting its score at the fresh session would be describing another run.
+    heldOnConfidence: undefined,
     // A restarted ticket's worktree is torn down and rebuilt from scratch, so
     // any PR the previous session opened no longer reflects what's about to
     // run — and a lingering `prUrl` would make the claim guard in `claim.ts`
