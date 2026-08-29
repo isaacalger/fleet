@@ -13,6 +13,7 @@ import {
   type ProjectConfig,
   type TicketDiffFile,
 } from "@fleet/shared";
+import { createHash } from "node:crypto";
 import { readBuildSpec } from "./buildspec.ts";
 import { run, runJson, runJsonPaginated } from "./exec.ts";
 import { log, logError } from "../log.ts";
@@ -317,6 +318,69 @@ export async function getIssue(project: ProjectConfig, issueNumber: number): Pro
   } catch {
     return undefined;
   }
+}
+
+/** SHA-256 of an issue body, used to detect a concurrent human edit during a triage session. */
+export function hashBody(body: string): string {
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+/**
+ * Posts a new, permanent issue comment. Distinct from `upsertStatusComment`,
+ * which maintains the single continuously-overwritten status comment — anything
+ * written there is destroyed by the next status update or heartbeat refresh.
+ */
+export async function createIssueComment(project: ProjectConfig, issueNumber: number, body: string): Promise<void> {
+  await run("gh", [
+    "issue", "comment", String(issueNumber),
+    "--repo", project.githubRepo,
+    "--body-file", "-",
+  ], { stdin: clampBody(body) });
+}
+
+function collisionComment(spec: string): string {
+  return [
+    "⚠️ **Concurrent edit detected.**",
+    "",
+    "The issue body changed while triage was investigating, so the diagnosis may rest on a stale premise.",
+    "The proposed spec is preserved here rather than written into the body:",
+    "",
+    spec,
+  ].join("\n");
+}
+
+/**
+ * Appends a triage spec to the issue body, but only when the body is
+ * byte-identical to what the session was claimed against. A human edit mid-run
+ * makes the agent's premise stale, so the spec is preserved as a standalone
+ * comment instead and the caller forces `fleet:needs-input` regardless of
+ * confidence.
+ *
+ * Detection compares a body hash rather than `updatedAt` deliberately: fleet's
+ * own label swaps, status-comment upserts, and heartbeat refreshes all bump
+ * `updatedAt` during a normal run, so a timestamp check would report a collision
+ * on essentially every triage and make auto-promotion dead code.
+ */
+export async function appendTriageSpecSafely(
+  project: ProjectConfig,
+  issueNumber: number,
+  spec: string,
+  bodyHashAtClaim: string,
+): Promise<"appended" | "commented"> {
+  const current = await getIssue(project, issueNumber);
+  if (!current) {
+    log("github", `triage #${issueNumber}: could not re-read the issue before appending — preserving the spec as a comment`);
+    await createIssueComment(project, issueNumber, collisionComment(spec));
+    return "commented";
+  }
+
+  if (hashBody(current.body) !== bodyHashAtClaim) {
+    await createIssueComment(project, issueNumber, collisionComment(spec));
+    return "commented";
+  }
+
+  await updateIssueBody(project, issueNumber, `${current.body}\n\n${spec}`);
+  return "appended";
 }
 
 /**
