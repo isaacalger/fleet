@@ -132,6 +132,8 @@ export interface BoardTicket {
   /** The `<name>` part of a `fleet:type:<name>` label, or null when untyped or unknown (e.g. an archived record predating this field). */
   type: string | null;
   isPlan: boolean;
+  /** True while the issue still carries `fleet:triage` — a bug under read-only investigation rather than feature work. */
+  isTriage: boolean;
   /** Unsatisfied `Depends-on` issue numbers — only set while they're still open. */
   blockedBy?: number[];
   /** The epic issue number this ticket is `Part-of`, parsed from its body — only set on children. */

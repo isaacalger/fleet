@@ -55,6 +55,7 @@ function open(record: HistoryRecord) {
     priority: null,
     type: record.ticketType ?? null,
     isPlan: record.isPlan ?? false,
+    isTriage: record.isTriage ?? false,
     record,
   });
 }
@@ -211,6 +212,11 @@ function nextPage() {
               v-if="record.isPlan"
               class="mr-1 rounded bg-success/15 px-1 text-success"
               >plan</span
+            >
+            <span
+              v-if="record.isTriage"
+              class="mr-1 rounded bg-warning/15 px-1 text-warning"
+              >triage</span
             >
             <span
               v-if="record.elevated"

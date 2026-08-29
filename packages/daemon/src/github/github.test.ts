@@ -445,6 +445,20 @@ describe("toBoardTicket — epic linkage", () => {
     const ticket = toBoardTicket(project, fleetIssue());
     expect(ticket?.type).toBeNull();
   });
+
+  it("projects a fleet:triage issue onto the ready column, flagged isTriage", () => {
+    const ticket = toBoardTicket(project, fleetIssue({ labels: ["bug", "fleet:triage"] }));
+    expect(ticket).not.toBeNull();
+    expect(ticket?.status).toBe("ready");
+    expect(ticket?.isTriage).toBe(true);
+    expect(ticket?.isPlan).toBe(false);
+  });
+
+  it("leaves isTriage false on an ordinary fleet:ready ticket", () => {
+    const ticket = toBoardTicket(project, fleetIssue());
+    expect(ticket?.isTriage).toBe(false);
+    expect(ticket?.status).toBe("ready");
+  });
 });
 
 describe("buildPrFeedback", () => {

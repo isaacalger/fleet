@@ -10,7 +10,14 @@ describe("TRIAGE_LABEL", () => {
     expect(ALL_FLEET_LABELS.map((l) => l.name)).toContain("fleet:triage");
   });
 
-  it("maps to no board status — triage issues are not board tickets", () => {
-    expect(boardStatusFromLabels(["fleet:triage"])).toBeNull();
+  it("maps to ready — a triage issue is awaiting pickup and belongs on the board", () => {
+    expect(boardStatusFromLabels(["fleet:triage"])).toBe("ready");
+    expect(boardStatusFromLabels(["bug", "fleet:triage"])).toBe("ready");
+  });
+
+  it("does not shadow a more specific state mid-claim", () => {
+    expect(boardStatusFromLabels(["fleet:triage", "fleet:in-progress"])).toBe("in-progress");
+    expect(boardStatusFromLabels(["fleet:triage", "fleet:needs-input"])).toBe("needs-input");
+    expect(boardStatusFromLabels(["fleet:triage", "fleet:review"])).toBe("review");
   });
 });

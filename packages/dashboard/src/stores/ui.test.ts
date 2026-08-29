@@ -16,6 +16,7 @@ function ticket(issueNumber: number, patch: Partial<BoardTicket> = {}): BoardTic
     priority: null,
     type: null,
     isPlan: false,
+    isTriage: false,
     ...patch,
   };
 }

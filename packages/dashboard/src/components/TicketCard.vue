@@ -88,6 +88,9 @@ const blurb = computed(() => {
       <Badge v-if="ticket.isPlan" variant="highlight">
         plan
       </Badge>
+      <Badge v-if="ticket.isTriage" variant="warning" title="Bug under read-only triage investigation">
+        triage
+      </Badge>
       <Badge
         v-if="ticket.epicProgress"
         variant="highlight"

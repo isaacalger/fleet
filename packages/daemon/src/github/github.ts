@@ -130,6 +130,7 @@ export function toBoardTicket(project: ProjectConfig, issue: FleetIssue, blocked
     priority: priorityOf(issue.labels),
     type: typeOf(issue.labels),
     isPlan: issue.labels.includes(PLAN_LABEL),
+    isTriage: issue.labels.includes(TRIAGE_LABEL),
     ...(blockedBy.length > 0 ? { blockedBy } : {}),
     ...(epicNumber !== undefined ? { epicNumber } : {}),
     ...(children.length > 0 ? { epicProgress: { closed: children.filter((c) => c.checked).length, total: children.length } } : {}),

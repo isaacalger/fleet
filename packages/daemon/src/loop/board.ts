@@ -40,6 +40,7 @@ export function synthesizeDoneTickets(
       priority: null,
       type: record.ticketType ?? null,
       isPlan: record.isPlan ?? false,
+      isTriage: record.isTriage ?? false,
       ...(record.epicNumber !== undefined ? { epicNumber: record.epicNumber } : {}),
       record,
     }));

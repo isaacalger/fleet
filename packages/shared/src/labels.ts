@@ -49,6 +49,10 @@ export function boardStatusFromLabels(labels: string[]): BoardStatus | null {
   if (labels.includes(FLEET_LABELS.inProgress)) return "in-progress";
   if (labels.includes(FLEET_LABELS.needsInput)) return "needs-input";
   if (labels.includes(FLEET_LABELS.review)) return "review";
+  // Last, so it can never shadow a more specific state: an issue mid-claim
+  // briefly carries both `fleet:triage` and `fleet:in-progress`, and a triage
+  // that has been picked up must read as in-progress, not ready.
+  if (labels.includes(TRIAGE_LABEL)) return "ready";
   return null;
 }
 
