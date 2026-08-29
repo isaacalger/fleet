@@ -36,6 +36,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog/index.ts";
 import PrDiff from "./PrDiff.vue";
+import ConfidenceBadge from "./ConfidenceBadge.vue";
 
 function formatApprovalWait(latency: ApprovalLatencyStats | undefined): string {
   if (!latency || latency.count === 0) return "—";
@@ -82,6 +83,19 @@ const acceptStatus = ref<string>();
 const closedRecord = computed<ClosedTicketRecord | undefined>(() =>
   detail.value?.record && "prState" in detail.value.record ? (detail.value.record as ClosedTicketRecord) : undefined,
 );
+
+const showTrail = ref(false);
+/**
+ * Exactly the entries that were recorded, oldest first — not a fixed set of
+ * stage slots. Most tickets never pass through all five stages, so gaps are the
+ * normal case, not a degraded rendering. The fetched detail wins over the board
+ * ticket's cached copy, which is only a fallback before the first load lands.
+ */
+const confidenceTrail = computed(
+  () => detail.value?.record?.confidenceHistory ?? props.ticket.record?.confidenceHistory ?? [],
+);
+
+const latestConfidence = computed(() => confidenceTrail.value.at(-1));
 
 const canReply = computed(() => detail.value?.canReply ?? false);
 const canRestart = computed(() => detail.value?.canRestart ?? false);
@@ -303,6 +317,25 @@ watch(
       </div>
       <p v-if="acceptStatus" class="mt-2 text-xs text-muted-foreground">{{ acceptStatus }}</p>
       <p v-if="restartStatus" class="mt-2 text-xs text-muted-foreground">{{ restartStatus }}</p>
+      <div v-if="latestConfidence" class="mt-2">
+        <button
+          type="button"
+          data-testid="confidence-trail-toggle"
+          class="flex items-center gap-2"
+          @click="showTrail = !showTrail"
+        >
+          <ConfidenceBadge :entry="latestConfidence" show-stage />
+          <span v-if="confidenceTrail.length > 1" class="text-xs text-muted-foreground">
+            {{ showTrail ? "hide" : "history" }}
+          </span>
+        </button>
+        <div v-if="showTrail" class="mt-2 flex flex-wrap items-center gap-1">
+          <template v-for="(entry, index) in confidenceTrail" :key="entry.at">
+            <span v-if="index > 0" class="text-xs text-muted-foreground">&rarr;</span>
+            <ConfidenceBadge :entry="entry" show-stage />
+          </template>
+        </div>
+      </div>
       <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
         <a :href="ticket.url" target="_blank" rel="noopener" class="text-primary hover:underline">
           {{ ticket.project }}#{{ ticket.issueNumber }}
