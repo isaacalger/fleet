@@ -97,12 +97,15 @@ than guessed at.
 `finishTriaged` in `loop/finish.ts`:
 
 1. Post root cause, evidence, and confidence to the issue's status comment.
-2. Append the rendered spec to the issue body via the existing
-   `updateIssueBody`.
+2. Write the rendered spec via `appendTriageSpecSafely` (below), which returns
+   `"appended"` or `"commented"`.
 3. Branch:
-   - `status === "completed"` and `confidence >= triageAutoPromoteThreshold`:
-     swap `fleet:triage` for `fleet:ready`, plus the suggested tier label. A
-     coding worker claims it on a later cycle.
+   - `"commented"` — a concurrent human edit was detected: swap `fleet:triage`
+     for `fleet:needs-input`, **regardless of confidence**.
+   - `status === "completed"`, `"appended"`, and
+     `confidence >= triageAutoPromoteThreshold`: swap `fleet:triage` for
+     `fleet:ready`, plus the suggested tier label. A coding worker claims it on
+     a later cycle.
    - Below threshold: swap `fleet:triage` for `fleet:needs-input`. A human
      decides from the dashboard.
    - `blocked`, or any session error: `fleet:needs-input`.
@@ -113,6 +116,81 @@ blocked triage never promotes. The asymmetry is intentional, because the
 downstream consequence differs. A failed review costs a missed check; a failed
 triage that promoted anyway would start an unsupervised coding session on an
 undiagnosed bug.
+
+### Concurrent human edits
+
+A triage session is long-running and read-only. If a human edits the issue body
+while it runs, the diagnosis rests on a stale premise. Blindly appending risks a
+spec that contradicts the body it is attached to.
+
+The rule is detect, abort, preserve: detect the collision, do not mutate the
+body, preserve the spec as a comment, and force `fleet:needs-input` so a human
+reconciles the two before any coding worker sees it.
+
+**Detection compares the body, not `updatedAt`.** An issue's `updatedAt` is
+bumped by any activity on it, and during a normal triage run fleet itself
+generates several: the claim-time label swap, every `upsertStatusComment`
+progress update, and each `refreshHeartbeatIfStale` PATCH once the heartbeat
+ages past half `staleClaimMinutes`. A timestamp comparison would therefore report
+a collision on essentially every run with no human involved, routing every
+triage to `needs-input` and making `triageAutoPromoteThreshold` dead config.
+
+Instead, `TicketRecord` gains `bodyHashAtClaim`, a SHA-256 of the issue body
+captured in `loop/runner.ts` when the session opens. `finishTriaged` re-fetches
+the issue and compares hashes. This detects exactly body edits and is immune to
+labels, comments, heartbeats, and assignment. Fleet never edits a triage issue's
+body mid-run, so the hash is stable unless a human changes it.
+
+**Preservation uses a new, permanent comment.** `upsertStatusComment` maintains
+a *single continuously-updated* comment; writing the spec there would have it
+overwritten by the next status update or heartbeat refresh. A new exported
+`createIssueComment` posts a distinct comment instead.
+
+```ts
+// packages/daemon/src/github/github.ts
+
+/** Posts a new, permanent issue comment — distinct from the single status comment. */
+export async function createIssueComment(
+  project: ProjectConfig, issueNumber: number, body: string,
+): Promise<void> {
+  await run("gh", ["issue", "comment", String(issueNumber),
+    "--repo", project.githubRepo, "--body-file", "-"], { stdin: clampBody(body) });
+}
+
+export function hashBody(body: string): string {
+  return createHash("sha256").update(body).digest("hex");
+}
+
+export async function appendTriageSpecSafely(
+  project: ProjectConfig,
+  issueNumber: number,
+  spec: string,
+  bodyHashAtClaim: string,
+): Promise<"appended" | "commented"> {
+  const current = await getIssue(project, issueNumber);
+  if (!current) return "commented";               // fetch failed → fail closed
+
+  if (hashBody(current.body) !== bodyHashAtClaim) {
+    await createIssueComment(project, issueNumber,
+      `⚠️ **Concurrent edit detected.**\n\nThe issue body changed while triage was ` +
+      `investigating, so the diagnosis may rest on a stale premise. The proposed ` +
+      `spec is preserved here rather than written into the body:\n\n${spec}`);
+    return "commented";
+  }
+
+  await updateIssueBody(project, issueNumber, `${current.body}\n\n${spec}`);
+  return "appended";
+}
+```
+
+A `getIssue` failure returns `"commented"`: an unreadable issue is an unknown
+premise, which fails closed like everything else on this path.
+
+**Residual race, stated rather than hidden.** A human can still edit between the
+`getIssue` and the `updateIssueBody`. GitHub issues have no compare-and-swap, so
+this window can be narrowed but not closed. It is now milliseconds rather than
+the length of a debugging session, and its worst case is a spec appended under a
+slightly stale body — not a lost human edit.
 
 ### Config
 
@@ -157,11 +235,15 @@ issue labeled `bug` (no fleet:*)
        └─> Investigate           → add `fleet:triage`
             └─> claim loop       → kind: "triage", read-only session
                  └─> systematic-debugging → TriageResult
-                      ├─ completed && confidence >= threshold
-                      │    └─> body += spec; label fleet:ready (+ tier)
-                      │         └─> ordinary coding worker → PR
-                      └─ otherwise
-                           └─> body += spec; label fleet:needs-input
+                      └─> appendTriageSpecSafely (body hash vs claim-time hash)
+                           ├─ "commented" (human edited mid-run)
+                           │    └─> spec as comment; label fleet:needs-input
+                           │         (confidence ignored)
+                           ├─ "appended" && completed && confidence >= threshold
+                           │    └─> body += spec; label fleet:ready (+ tier)
+                           │         └─> ordinary coding worker → PR
+                           └─ otherwise
+                                └─> body += spec; label fleet:needs-input
 ```
 
 ## Error handling
@@ -171,7 +253,9 @@ issue labeled `bug` (no fleet:*)
 | Session errors | `fleet:needs-input`; never promoted |
 | Result is `blocked` | Question posted, `fleet:needs-input`, session held for reply per existing `replyWaitMinutes` |
 | Confidence below threshold | `fleet:needs-input`; not a failure, spec still written to the body |
-| `updateIssueBody` fails | Log, post the spec to the status comment instead, do not promote |
+| Body hash differs at finish | Spec posted as a new comment, `fleet:needs-input`, confidence ignored |
+| `getIssue` fails at finish | Treated as a collision (`"commented"`); never promoted |
+| `updateIssueBody` fails | Log, post the spec via `createIssueComment`, do not promote |
 | Issue already carries a `fleet:*` label | Investigate is rejected; it is not a triage candidate |
 | Existing auto-elevate on failure | Applies unchanged; a triage that errors retries once on `elevatedModel` |
 
@@ -186,6 +270,12 @@ per-behavior test-file pattern and using the shared fixture factories in
 - Confidence below threshold lands in `fleet:needs-input`
 - A blocked result lands in `fleet:needs-input`
 - A session error does not promote
+- An unchanged body appends the spec and promotes at high confidence
+- A body edited mid-run posts a comment, does not touch the body, and lands in
+  `fleet:needs-input` even at 100 confidence
+- A `getIssue` failure at finish does not promote
+- Label swaps and status-comment updates during a run do **not** trip collision
+  detection (the regression test for the `updatedAt` approach this replaced)
 - `git commit` is denied in a triage session
 - `triage: false` means a `fleet:triage` issue is never claimed
 - The promoted body passes `lintIntake`
