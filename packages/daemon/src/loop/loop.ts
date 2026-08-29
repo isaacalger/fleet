@@ -205,6 +205,10 @@ export class FleetLoop {
     return getBoard(this.ctx);
   }
 
+  getProjects(): ProjectConfig[] {
+    return this.config.projects;
+  }
+
   getProject(name: string): ProjectConfig | undefined {
     return this.config.projects.find((p) => p.name === name);
   }
