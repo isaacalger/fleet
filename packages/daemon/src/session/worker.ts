@@ -53,6 +53,7 @@ Contract:
 - Run the project's own checks (tests, typecheck, lint) before declaring completion when they exist.
 - If you hit a decision the issue does not answer, do NOT guess: finish with status "blocked" and put the specific question in blockedReason. A human may answer in a follow-up message — then continue the work.
 - Your final structured output: status "completed" requires prTitle and prBody; status "blocked" requires blockedReason.
+- Report a calibrated confidence percentage (0-100). A score below the project's threshold stops this ticket for human review instead of opening a PR, so an overstated number wastes a human's time on work you knew was shaky — and an understated one stops work that was fine. 90+ means you verified the change end to end; below 50 means you are guessing.
 `.trim();
 
 const PLANNER_CONTRACT = `
@@ -65,6 +66,7 @@ Contract:
 - If a child genuinely can't be implemented before another lands (e.g. "use the schema field" needs "add the schema field" first), set that child's dependsOnIndex to the 0-based index of the sibling(s) it depends on in tickets[] — sparingly, and only pointing at an earlier index (a later or self index is dropped).
 - If the epic is too ambiguous to decompose confidently, do NOT guess: finish with status "blocked" and put the specific question in blockedReason.
 - Your final structured output lists every proposed child ticket in tickets[].
+- Report a calibrated confidence percentage (0-100) for the decomposition as a whole. A score below the project's threshold stops the epic for human review instead of filing the child tickets, so be honest: 90+ means every child is genuinely self-contained and correctly scoped; below 50 means you are unsure the epic decomposes this way at all.
 `.trim();
 
 const TRIAGE_CONTRACT = `

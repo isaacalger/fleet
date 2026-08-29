@@ -152,3 +152,13 @@ describe("sessionTitle", () => {
     expect(sessionTitle("alpha#62", "plan-review")).toBe("fleet alpha#62 plan-review");
   });
 });
+
+describe("contract confidence guidance", () => {
+  it("asks a code session for a calibrated confidence percentage", () => {
+    expect(buildSystemPromptAppend("code")).toContain("calibrated confidence percentage");
+  });
+
+  it("asks a plan session for a calibrated confidence percentage", () => {
+    expect(buildSystemPromptAppend("plan")).toContain("calibrated confidence percentage");
+  });
+});

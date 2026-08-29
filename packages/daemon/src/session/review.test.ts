@@ -3,6 +3,8 @@ import { TEST_CONFIDENCE } from "../test-support.ts";
 import type { MachineReviewResult, PlanResult, PlanReviewResult } from "@fleet/shared";
 import {
   MACHINE_REVIEW_OUTPUT_SCHEMA,
+  PLAN_REVIEWER_CONTRACT,
+  REVIEWER_CONTRACT,
   PLAN_REVIEW_OUTPUT_SCHEMA,
   buildMachineReviewFixPrompt,
   buildMachineReviewPrompt,
@@ -304,5 +306,15 @@ describe("plan review prompts", () => {
     expect(prompt).toContain("references ticket 0's schema without restating it");
     expect(prompt).toContain("**the decomposition as a whole**: missing scope");
     expect(prompt).toContain("Revise tickets[]");
+  });
+});
+
+describe("reviewer contracts", () => {
+  it("asks a machine review for a calibrated confidence percentage", () => {
+    expect(REVIEWER_CONTRACT).toContain("calibrated confidence percentage");
+  });
+
+  it("asks a plan review for a calibrated confidence percentage", () => {
+    expect(PLAN_REVIEWER_CONTRACT).toContain("calibrated confidence percentage");
   });
 });
