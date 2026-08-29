@@ -37,6 +37,7 @@ const {
   priorityRank,
   readyLabelArgs,
   removeLabel,
+  swapLabel,
   refreshHeartbeat,
   refreshHeartbeatIfStale,
   toBoardTicket,
@@ -644,6 +645,19 @@ describe("getPrDiff", () => {
       "pr", "view", "https://github.com/acme/alpha/pull/7",
       "--repo", "acme/alpha",
       "--json", "files",
+    ]);
+  });
+});
+
+describe("swapLabel", () => {
+  it("adds the new label before removing the old one, so the issue is never label-less", async () => {
+    vi.mocked(exec.run).mockResolvedValue({ stdout: "", stderr: "" });
+
+    await swapLabel(project, 7, "fleet:in-progress", "fleet:ready");
+
+    expect(vi.mocked(exec.run).mock.calls.map((c) => c[1])).toEqual([
+      ["issue", "edit", "7", "--repo", "acme/alpha", "--add-label", "fleet:ready"],
+      ["issue", "edit", "7", "--repo", "acme/alpha", "--remove-label", "fleet:in-progress"],
     ]);
   });
 });

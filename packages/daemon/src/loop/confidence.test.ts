@@ -46,6 +46,17 @@ describe("recordConfidence", () => {
 
     expect(trail(ctx)).toEqual([["triage", 88], ["code", 91]]);
   });
+
+  it("logs rather than silently dropping a score for a ticket no longer in the store", () => {
+    const ctx = makeCtx();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    recordConfidence(ctx, "alpha", 62, "code", 44, 70);
+
+    expect(ctx.state.get("alpha", 62)).toBeUndefined();
+    expect(errors.mock.calls.flat().join(" ")).toContain("confidence entry dropped (code 44%)");
+    errors.mockRestore();
+  });
 });
 
 describe("confidenceGate", () => {
@@ -69,15 +80,26 @@ describe("confidenceGate", () => {
     ]);
   });
 
-  it("never holds when the stage is ungated, and stamps a null threshold", async () => {
+  it("holds when the stage is ungated — a null threshold is unpassable, not absent — and stamps it", async () => {
     const ctx = ctxWithTicket();
+
+    const result = await confidenceGate(ctx, makeProject({ triageAutoPromote: false }), 62, "triage", 100);
+
+    expect(result.action).toBe("hold");
+    if (result.action === "hold") expect(result.reason).toContain("auto-promotion is disabled");
+    expect(ctx.state.get("alpha", 62)?.confidenceHistory).toEqual([
+      expect.objectContaining({ score: 100, threshold: null }),
+    ]);
+  });
+
+  it("lets an operator override beat a project default that disabled auto-promotion", async () => {
+    const ctx = ctxWithTicket();
+    vi.mocked(github.getIssue).mockResolvedValue(issueWith([CONFIDENCE_OVERRIDE_LABEL]));
 
     const result = await confidenceGate(ctx, makeProject({ triageAutoPromote: false }), 62, "triage", 3);
 
     expect(result.action).toBe("proceed");
-    expect(ctx.state.get("alpha", 62)?.confidenceHistory).toEqual([
-      expect.objectContaining({ score: 3, threshold: null }),
-    ]);
+    expect(github.removeLabel).toHaveBeenCalledWith(expect.anything(), 62, CONFIDENCE_OVERRIDE_LABEL);
   });
 
   it("carries a low score past the gate on an operator override, consuming the label", async () => {
@@ -136,6 +158,13 @@ describe("confidenceHoldPreamble", () => {
   it("names the score and the threshold it missed", () => {
     expect(confidenceHoldPreamble(entry, false)).toContain("42%");
     expect(confidenceHoldPreamble(entry, false)).toContain("70%");
+  });
+
+  it("never renders a null threshold as a percentage", () => {
+    const ungated = { ...entry, stage: "triage" as const, threshold: null };
+
+    expect(confidenceHoldPreamble(ungated, false)).not.toContain("null");
+    expect(confidenceHoldPreamble(ungated, false)).toContain("auto-promotion is disabled");
   });
 
   it("reads as waived once a human has reviewed the result", () => {

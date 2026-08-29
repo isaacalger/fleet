@@ -351,11 +351,8 @@ export async function finishTriaged(
   let held = blocker;
   if (blocker === null) {
     const gate = await confidenceGate(ctx, project, issue.number, "triage", result.confidence);
-    // `thresholdFor` reports null when auto-promote is off, so the gate always
-    // proceeds there: it records the score but has no bar to judge it against.
-    // Whether to promote at all remains the project's switch, not the gate's.
-    promote = gate.action === "proceed" && project.triageAutoPromote;
-    held = promote ? null : gate.action === "hold" ? gate.reason : "triage auto-promote is disabled for this project";
+    promote = gate.action === "proceed";
+    held = gate.action === "hold" ? gate.reason : null;
   } else {
     // Record the score even when a non-confidence blocker holds the ticket, so
     // the trail shows what triage actually reported.

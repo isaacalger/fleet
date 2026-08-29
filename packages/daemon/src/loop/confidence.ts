@@ -9,9 +9,12 @@ import { key, type LoopContext } from "./context.ts";
 import { log, logError } from "../log.ts";
 
 /**
- * The bar this stage is judged against, or null when the stage is recorded but
- * not gated. Only triage can be ungated, via `triageAutoPromote: false` — the
- * score is still worth keeping, there is just no bar it can be said to miss.
+ * The bar this stage is judged against, or null when there is no bar at all.
+ * Only triage can be ungated, via `triageAutoPromote: false` — the score is
+ * still worth keeping, there is just no number it could clear. A null is
+ * therefore an unpassable bar, not an absent one: `confidenceGate` holds on it
+ * (short of an operator override), so an operator who disabled auto-promotion
+ * gets what they asked for no matter which call site runs the gate.
  */
 export function thresholdFor(project: ProjectConfig, stage: ConfidenceStage): number | null {
   if (stage === "triage" && !project.triageAutoPromote) return null;
@@ -36,7 +39,14 @@ export function recordConfidence(
     at: new Date().toISOString(),
   };
   const existing = ctx.state.get(projectName, issueNumber)?.confidenceHistory ?? [];
-  ctx.state.update(projectName, issueNumber, { confidenceHistory: [...existing, entry] });
+  // `StateStore.update` no-ops for a ticket that is no longer in the store (cleaned
+  // up mid-flight, or reconciled away by a boot). Returning the entry regardless
+  // would silently lose a score from the one module whose job is the audit trail —
+  // but throwing would turn a bookkeeping miss into a failed terminal path, so log.
+  const updated = ctx.state.update(projectName, issueNumber, { confidenceHistory: [...existing, entry] });
+  if (!updated) {
+    logError("loop", `${key(projectName, issueNumber)}: no ticket record — confidence entry dropped (${stage} ${score}%)`, undefined);
+  }
   return entry;
 }
 
@@ -62,12 +72,16 @@ export async function confidenceGate(
   const scope = key(project.name, issueNumber);
   const threshold = thresholdFor(project, stage);
 
-  if (threshold === null || score >= threshold) {
+  if (threshold !== null && score >= threshold) {
     recordConfidence(ctx, project.name, issueNumber, stage, score, threshold);
     return { action: "proceed" };
   }
 
-  // Below the bar: the only way through is a human-applied override, consumed here.
+  // Below the bar — or, for a null threshold, with no bar the score could ever
+  // clear ("recorded, not gated": only triage with `triageAutoPromote: false`
+  // reaches here). Either way the only way through is a human-applied override,
+  // consumed here. An explicit label beats a project default, so an override
+  // carries a stage past its gate whether that gate is a number or a switch.
   let overridden = false;
   try {
     const issue = await getIssue(project, issueNumber);
@@ -84,11 +98,14 @@ export async function confidenceGate(
 
   const entry = recordConfidence(ctx, project.name, issueNumber, stage, score, threshold, overridden);
   if (overridden) {
-    log("loop", `${scope}: ${stage} scored ${score}% (below ${threshold}%) — carried past the gate by an operator override`);
+    log("loop", `${scope}: ${stage} scored ${score}% (bar: ${threshold ?? "auto-promotion disabled"}) — carried past the gate by an operator override`);
     return { action: "proceed" };
   }
 
-  const reason = `${stage} confidence ${score}% is below the ${threshold}% threshold`;
+  const reason =
+    threshold === null
+      ? `${stage} auto-promotion is disabled for this project`
+      : `${stage} confidence ${score}% is below the ${threshold}% threshold`;
   log("loop", `${scope}: ${reason} — holding for human review`);
   return { action: "hold", reason, entry };
 }
@@ -103,7 +120,13 @@ export async function confidenceGate(
  * never a replacement for it.
  */
 export function confidenceHoldPreamble(entry: ConfidenceEntry, waived: boolean): string {
-  const held = `This ticket was held because your ${entry.stage} confidence was ${entry.score}%, below the ${entry.threshold}% threshold.`;
+  // A null threshold means the stage was never gated on a number at all, so
+  // there is no comparison to report — saying "below the null% threshold" would
+  // read as a bug to the session and invite it to chase a score it can't move.
+  const held =
+    entry.threshold === null
+      ? `This ticket was held because ${entry.stage} auto-promotion is disabled for this project; your ${entry.stage} confidence was ${entry.score}%.`
+      : `This ticket was held because your ${entry.stage} confidence was ${entry.score}%, below the ${entry.threshold}% threshold.`;
   if (waived) {
     return [
       held,
