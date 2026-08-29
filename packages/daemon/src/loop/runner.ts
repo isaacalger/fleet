@@ -1,5 +1,6 @@
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { tierForType, ELEVATE_LABEL, LIGHT_LABEL, PLAN_LABEL, TRIAGE_LABEL, mergeModelUsage, type Effort, type ProjectConfig, type TicketRecord, type Tier } from "@fleet/shared";
+import { confidenceHoldPreamble } from "./confidence.ts";
 import { key, markWorking, type LoopContext, type SessionBase } from "./context.ts";
 import { reportRunFailure } from "./finish.ts";
 import { readBuildSpec, resolveTypeContract, resolveTypeVerify } from "../github/buildspec.ts";
@@ -261,13 +262,22 @@ export async function resumeTicket(
     await markWorking(ctx, project, record.issueNumber);
     const journal = new Journal(ctx.dataDirPath, project.name, record.issueNumber);
     journal.append({ type: "fleet", event: "resumed", sessionId: record.sessionId, elevated, light, isPlan, isTriage, reason });
+    // A confidence hold is the one resume where the operator's text alone is
+    // not enough context: the session remembers its score but not that the
+    // score is why it stopped.
+    const lastEntry = record.confidenceHistory?.at(-1);
+    const heldOnConfidence =
+      lastEntry !== undefined && (lastEntry.threshold === null || lastEntry.score < lastEntry.threshold);
+    const firstMessage = heldOnConfidence
+      ? confidenceHoldPreamble(lastEntry, lastEntry.overridden === true) + message
+      : message;
     await runSession(ctx, {
       project,
       issue,
       worktree: { path: record.worktreePath, branch: record.branch },
       journal,
       resumeSessionId: record.sessionId,
-      firstMessage: message,
+      firstMessage,
       elevated,
       light,
       kind: isPlan ? "plan" : isTriage ? "triage" : "code",

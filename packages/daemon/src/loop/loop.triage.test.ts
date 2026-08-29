@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { TriageResult } from "@fleet/shared";
+import type { ConfidenceEntry, TriageResult } from "@fleet/shared";
 import { makeCtx, makeIssue, makeProject, makeRecord } from "../test-support.ts";
 
 const hoisted = vi.hoisted(() => ({
   sessionOpts: [] as Array<Record<string, unknown>>,
+  // `firstMessage` reaches the session through `send()`, not the constructor, so
+  // the resume-context assertions below need their own capture.
+  sent: [] as string[],
   turns: [] as Array<Record<string, unknown>>,
 }));
 
@@ -52,7 +55,9 @@ vi.mock("../session/worker.ts", async (importActual) => {
     constructor(opts: Record<string, unknown>) {
       hoisted.sessionOpts.push(opts);
     }
-    send(): void {}
+    send(message: string): void {
+      hoisted.sent.push(message);
+    }
     close(): void {}
     async nextResult(): Promise<unknown> {
       return hoisted.turns.shift() ?? { kind: "code", errorSubtype: "stream_ended_without_result" };
@@ -82,6 +87,7 @@ const RESULT: TriageResult = {
 beforeEach(() => {
   vi.clearAllMocks();
   hoisted.sessionOpts.length = 0;
+  hoisted.sent.length = 0;
   hoisted.turns.length = 0;
   vi.mocked(github.appendTriageSpecSafely).mockResolvedValue("appended");
   vi.mocked(github.getIssue).mockResolvedValue(undefined);
@@ -405,5 +411,56 @@ describe("resuming a triage ticket", () => {
 
     expect(hoisted.sessionOpts[0]!.kind).toBe("triage");
     expect(ctx.state.get("alpha", 7)?.isTriage).toBe(true);
+  });
+});
+
+describe("resuming a confidence-held ticket", () => {
+  async function resumeWith(confidenceHistory: ConfidenceEntry[] | undefined): Promise<string> {
+    const ctx = makeCtx();
+    ctx.state.upsert(makeRecord({ issueNumber: 7, sessionId: "sess-1", confidenceHistory }));
+
+    await resumeTicket(ctx, makeProject(), ctx.state.get("alpha", 7)!, "have another look");
+
+    return hoisted.sent[0]!;
+  }
+
+  const entry = (patch: Partial<ConfidenceEntry>): ConfidenceEntry => ({
+    stage: "code",
+    score: 65,
+    threshold: 70,
+    at: "2026-08-29T00:00:00.000Z",
+    ...patch,
+  });
+
+  it("explains the hold ahead of the operator's own message", async () => {
+    const message = await resumeWith([entry({})]);
+
+    expect(message).toContain("65%");
+    expect(message).toContain("have another look");
+  });
+
+  it("explains a hold that had no threshold to clear at all", async () => {
+    const message = await resumeWith([entry({ stage: "triage", score: 95, threshold: null })]);
+
+    expect(message).toContain("auto-promotion is disabled");
+    expect(message).toContain("have another look");
+  });
+
+  it("tells a waived session not to re-litigate its score", async () => {
+    const message = await resumeWith([entry({ overridden: true })]);
+
+    expect(message).toContain("waived that gate");
+  });
+
+  it("sends a passing session's message unchanged", async () => {
+    const message = await resumeWith([entry({ score: 91 })]);
+
+    expect(message).toBe("have another look");
+  });
+
+  it("sends a pre-confidence ticket's message unchanged", async () => {
+    const message = await resumeWith(undefined);
+
+    expect(message).toBe("have another look");
   });
 });
