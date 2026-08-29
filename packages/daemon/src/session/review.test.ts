@@ -99,15 +99,15 @@ describe("isActionable", () => {
   const finding = { file: "a.ts", summary: "bug", detail: "why" };
 
   it("is actionable only for a findings verdict with findings", () => {
-    expect(isActionable({ verdict: "findings", summary: "s", findings: [finding] })).toBe(true);
+    expect(isActionable({ verdict: "findings", summary: "s", confidence: 90, findings: [finding] })).toBe(true);
   });
 
   it("treats a findings verdict with an empty list as a pass", () => {
-    expect(isActionable({ verdict: "findings", summary: "s", findings: [] })).toBe(false);
+    expect(isActionable({ verdict: "findings", summary: "s", confidence: 90, findings: [] })).toBe(false);
   });
 
   it("never actionable on pass", () => {
-    expect(isActionable({ verdict: "pass", summary: "s", findings: [finding] })).toBe(false);
+    expect(isActionable({ verdict: "pass", summary: "s", confidence: 90, findings: [finding] })).toBe(false);
   });
 });
 
@@ -220,6 +220,7 @@ describe("prompts", () => {
     const result: MachineReviewResult = {
       verdict: "findings",
       summary: "Two problems.",
+      confidence: 90,
       findings: [
         { file: "src/a.ts", line: 12, severity: "major", summary: "off-by-one", detail: "loop bound excludes the last item" },
         { file: "src/b.ts", summary: "missing null check", detail: "crashes on empty input" },
@@ -255,15 +256,15 @@ describe("isPlanActionable", () => {
   const finding = { summary: "bug", detail: "why" };
 
   it("is actionable only for a findings verdict with findings", () => {
-    expect(isPlanActionable({ verdict: "findings", summary: "s", findings: [finding] })).toBe(true);
+    expect(isPlanActionable({ verdict: "findings", summary: "s", confidence: 90, findings: [finding] })).toBe(true);
   });
 
   it("treats a findings verdict with an empty list as a pass", () => {
-    expect(isPlanActionable({ verdict: "findings", summary: "s", findings: [] })).toBe(false);
+    expect(isPlanActionable({ verdict: "findings", summary: "s", confidence: 90, findings: [] })).toBe(false);
   });
 
   it("never actionable on pass", () => {
-    expect(isPlanActionable({ verdict: "pass", summary: "s", findings: [finding] })).toBe(false);
+    expect(isPlanActionable({ verdict: "pass", summary: "s", confidence: 90, findings: [finding] })).toBe(false);
   });
 });
 
@@ -271,7 +272,7 @@ describe("plan review prompts", () => {
   const planResult: PlanResult = {
     status: "completed",
     summary: "Splits the epic into two tickets.",
-    confidence: "high",
+    confidence: 90,
     tickets: [
       { title: "Add the schema field", body: "## Problem\n\nAdd a field", tier: "light", dependsOnIndex: [] },
       { title: "Use it in the dashboard", body: "## Problem\n\nUse the field", dependsOnIndex: [0] },
@@ -291,6 +292,7 @@ describe("plan review prompts", () => {
     const result: PlanReviewResult = {
       verdict: "findings",
       summary: "Two problems.",
+      confidence: 90,
       findings: [
         { ticketIndex: 1, severity: "major", summary: "not self-contained", detail: "references ticket 0's schema without restating it" },
         { summary: "missing scope", detail: "no ticket covers the migration script" },

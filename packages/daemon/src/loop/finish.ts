@@ -125,7 +125,7 @@ export async function finishCompleted(
   worktreePath: string,
   branch: string,
   summary: string,
-  result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: string },
+  result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: number },
 ): Promise<void> {
   if (!(await hasCommits(project, worktreePath))) {
     await finishBlocked(ctx, project, issue, "Worker reported completed but made no commits.", summary);
@@ -159,7 +159,7 @@ export async function finishCompleted(
     }
     await moveToReview(ctx, project, issue.number, {
       comment: [
-        `**Status: ready for review** (confidence: ${result.confidence})`,
+        `**Status: ready for review** (confidence: ${result.confidence}%)`,
         summary,
         machineReviewLine(record?.machineReviewOutcome),
         result.filesChanged.length > 0 ? `Files changed:\n${result.filesChanged.map((f) => `- \`${f}\``).join("\n")}` : "",
@@ -228,7 +228,7 @@ export async function finishPlanned(
     const record = ctx.state.get(project.name, issue.number);
     await moveToReview(ctx, project, issue.number, {
       comment: [
-        `**Status: planned** (confidence: ${result.confidence})`,
+        `**Status: planned** (confidence: ${result.confidence}%)`,
         result.summary,
         machineReviewLine(record?.machineReviewOutcome),
         "This plan re-completed after its children were already filed — no new issues were created. Review the existing children against the summary above.",
@@ -280,7 +280,7 @@ export async function finishPlanned(
   const record = ctx.state.get(project.name, issue.number);
   await moveToReview(ctx, project, issue.number, {
     comment: [
-      `**Status: planned** (confidence: ${result.confidence})`,
+      `**Status: planned** (confidence: ${result.confidence}%)`,
       result.summary,
       machineReviewLine(record?.machineReviewOutcome),
       created.length > 0

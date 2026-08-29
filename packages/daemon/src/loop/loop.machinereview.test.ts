@@ -97,7 +97,7 @@ function planResult(patch: Partial<PlanResult> = {}): PlanResult {
   return {
     status: "completed",
     summary: "Decomposed into two tickets.",
-    confidence: "high",
+    confidence: 90,
     tickets: [
       { title: "Ticket A", body: "## Problem\n\nA\n\n## Acceptance criteria\n\n- [ ] a\n\n## Verification\n\nrun a" },
       { title: "Ticket B", body: "## Problem\n\nB\n\n## Acceptance criteria\n\n- [ ] b\n\n## Verification\n\nrun b" },
@@ -116,7 +116,7 @@ beforeEach(() => {
 describe("machineReviewGate", () => {
   it("proceeds on a pass verdict and records the outcome and reviewer cost", async () => {
     vi.mocked(review.runMachineReview).mockResolvedValue(
-      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", findings: [] } }),
+      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", confidence: 90, findings: [] } }),
     );
     const { state, internals } = makeLoop(record());
     const base = { costUsd: 3 };
@@ -152,7 +152,7 @@ describe("machineReviewGate", () => {
     try {
       vi.mocked(github.getIssueComments).mockResolvedValue(["@alice: please also handle X"]);
       vi.mocked(review.runMachineReview).mockResolvedValue(
-        reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", findings: [] } }),
+        reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", confidence: 90, findings: [] } }),
       );
       const { internals } = makeLoop(record({ ticketType: "api", worktreePath: dir }));
 
@@ -173,7 +173,7 @@ describe("machineReviewGate", () => {
   it("reviews without the discussion when the comment fetch fails, rather than skipping the review", async () => {
     vi.mocked(github.getIssueComments).mockRejectedValue(new Error("gh exploded"));
     vi.mocked(review.runMachineReview).mockResolvedValue(
-      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", findings: [] } }),
+      reviewOutcome({ result: { verdict: "pass", summary: "Looks correct.", confidence: 90, findings: [] } }),
     );
     const { state, internals } = makeLoop(record());
 
@@ -192,6 +192,7 @@ describe("machineReviewGate", () => {
         result: {
           verdict: "findings",
           summary: "One problem.",
+          confidence: 90,
           findings: [{ file: "src/a.ts", line: 3, severity: "major", summary: "off-by-one", detail: "bound excludes last item" }],
         },
       }),
@@ -286,7 +287,7 @@ describe("machineReviewGate", () => {
 describe("planReviewGate", () => {
   it("proceeds on a pass verdict and records the outcome and reviewer cost", async () => {
     vi.mocked(review.runPlanReview).mockResolvedValue(
-      planReviewOutcome({ result: { verdict: "pass", summary: "Good decomposition.", findings: [] } }),
+      planReviewOutcome({ result: { verdict: "pass", summary: "Good decomposition.", confidence: 90, findings: [] } }),
     );
     const { state, internals } = makeLoop(record());
     const base = { costUsd: 3 };
@@ -307,6 +308,7 @@ describe("planReviewGate", () => {
         result: {
           verdict: "findings",
           summary: "One ticket is too broad.",
+          confidence: 90,
           findings: [{ ticketIndex: 1, severity: "major", summary: "not PR-sized", detail: "split into two tickets" }],
         },
       }),

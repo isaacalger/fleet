@@ -280,7 +280,7 @@ export class FleetLoop {
     worktreePath: string,
     branch: string,
     summary: string,
-    result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: string },
+    result: { prTitle?: string; prBody?: string; filesChanged: string[]; confidence: number },
   ): Promise<void> {
     return finishCompleted(this.ctx, project, issue, worktreePath, branch, summary, result);
   }
