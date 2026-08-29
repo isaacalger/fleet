@@ -38,7 +38,7 @@ export const ALL_FLEET_LABELS: { name: string; color: string; description: strin
   { name: ELEVATE_LABEL, color: "5319e7", description: "Run this ticket on the project's elevated model" },
   { name: LIGHT_LABEL, color: "bfd4f2", description: "Run this ticket on the project's light model" },
   { name: PLAN_LABEL, color: "c2e0c6", description: "Decompose this epic into child tickets instead of coding it" },
-  { name: TRIAGE_LABEL, color: "fbca04", description: "Investigate this issue with a read-only triage session and produce a spec" },
+  { name: TRIAGE_LABEL, color: "006b75", description: "Investigate this issue with a read-only triage session and produce a spec" },
   { name: "fleet:p1", color: "b60205", description: "Highest priority" },
   { name: "fleet:p2", color: "d93f0b", description: "Medium priority" },
   { name: "fleet:p3", color: "fef2c0", description: "Low priority" },
