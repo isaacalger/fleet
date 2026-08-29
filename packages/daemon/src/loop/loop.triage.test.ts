@@ -19,6 +19,7 @@ vi.mock("../github/github.ts", async (importActual) => ({
   getAuthenticatedLogin: vi.fn(async () => "daemon-user"),
   getIssueComments: vi.fn(async () => []),
   getIssue: vi.fn(async () => undefined),
+  removeLabel: vi.fn(async () => {}),
 }));
 
 vi.mock("../github/worktree.ts", async (importActual) => ({
@@ -125,6 +126,49 @@ describe("finishTriaged", () => {
   it("never promotes a blocked result", async () => {
     const { ctx, project, issue } = setup(0);
     await finishTriaged(ctx, project, issue, { ...RESULT, status: "blocked", blockedReason: "which browser?" });
+    expect(github.swapLabel).toHaveBeenCalledWith(project, 7, "fleet:in-progress", "fleet:needs-input");
+  });
+
+  it("holds with an ungated history entry when auto-promote is off", async () => {
+    const ctx = makeCtx();
+    ctx.state.upsert(makeRecord({ project: "alpha", issueNumber: 7, isTriage: true, bodyHashAtClaim: "h" }));
+    const project = makeProject({ triage: true, confidenceThreshold: 70, triageAutoPromote: false });
+
+    await finishTriaged(ctx, project, makeIssue(7), { ...RESULT, confidence: 95 });
+
+    expect(github.swapLabel).toHaveBeenCalledWith(project, 7, "fleet:in-progress", "fleet:needs-input");
+    expect(ctx.state.get("alpha", 7)?.confidenceHistory?.at(-1)).toMatchObject({ stage: "triage", score: 95, threshold: null });
+  });
+
+  it("promotes a below-threshold triage carrying the operator override label", async () => {
+    vi.mocked(github.getIssue).mockResolvedValue({ number: 7, title: "t", body: "b", labels: ["fleet:confidence-overridden"] } as never);
+    const { ctx, project, issue } = setup(70);
+
+    await finishTriaged(ctx, project, issue, { ...RESULT, confidence: 40 });
+
+    expect(github.removeLabel).toHaveBeenCalledWith(project, 7, "fleet:confidence-overridden");
+    expect(github.swapLabel).toHaveBeenCalledWith(project, 7, "fleet:in-progress", "fleet:ready");
+  });
+
+  it("short-circuits a body collision before the gate, leaving the override unconsumed", async () => {
+    vi.mocked(github.appendTriageSpecSafely).mockResolvedValue("commented");
+    vi.mocked(github.getIssue).mockResolvedValue({ number: 7, title: "t", body: "b", labels: ["fleet:confidence-overridden"] } as never);
+    const { ctx, project, issue } = setup(70);
+
+    await finishTriaged(ctx, project, issue, { ...RESULT, confidence: 40 });
+
+    expect(github.removeLabel).not.toHaveBeenCalled();
+    expect(github.swapLabel).toHaveBeenCalledWith(project, 7, "fleet:in-progress", "fleet:needs-input");
+    expect(ctx.state.get("alpha", 7)?.confidenceHistory?.at(-1)?.score).toBe(40);
+  });
+
+  it("short-circuits a blocked result before the gate, even at full confidence", async () => {
+    vi.mocked(github.getIssue).mockResolvedValue({ number: 7, title: "t", body: "b", labels: ["fleet:confidence-overridden"] } as never);
+    const { ctx, project, issue } = setup(70);
+
+    await finishTriaged(ctx, project, issue, { ...RESULT, status: "blocked", blockedReason: "which browser?", confidence: 100 });
+
+    expect(github.removeLabel).not.toHaveBeenCalled();
     expect(github.swapLabel).toHaveBeenCalledWith(project, 7, "fleet:in-progress", "fleet:needs-input");
   });
 

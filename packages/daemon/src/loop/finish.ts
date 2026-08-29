@@ -7,6 +7,7 @@ import {
   type TicketRecord,
   type TriageResult,
 } from "@fleet/shared";
+import { confidenceGate, recordConfidence, thresholdFor } from "./confidence.ts";
 import { key, type LoopContext } from "./context.ts";
 import {
   addLabel,
@@ -337,21 +338,29 @@ export async function finishTriaged(
   // missing claim-time hash routes to "commented" — failing closed.
   const written = await appendTriageSpecSafely(project, issue.number, spec, record?.bodyHashAtClaim ?? "");
 
-  // Interim inline gate — task 8 replaces this with the shared confidence gate.
-  const promote =
-    result.status === "completed" &&
-    written === "appended" &&
-    project.triageAutoPromote &&
-    result.confidence >= project.confidenceThreshold;
-
-  const held =
+  // The collision and blocked checks short-circuit *before* the gate: neither
+  // is a confidence question, and both fail closed on their own.
+  const blocker =
     written === "commented"
       ? "the issue body was edited while triage was running"
       : result.status === "blocked"
         ? `triage is blocked: ${result.blockedReason ?? "no reason given"}`
-        : !project.triageAutoPromote
-          ? "triage auto-promote is disabled for this project"
-          : `confidence ${result.confidence}% is below the ${project.confidenceThreshold}% auto-promote threshold`;
+        : null;
+
+  let promote = false;
+  let held = blocker;
+  if (blocker === null) {
+    const gate = await confidenceGate(ctx, project, issue.number, "triage", result.confidence);
+    // `thresholdFor` reports null when auto-promote is off, so the gate always
+    // proceeds there: it records the score but has no bar to judge it against.
+    // Whether to promote at all remains the project's switch, not the gate's.
+    promote = gate.action === "proceed" && project.triageAutoPromote;
+    held = promote ? null : gate.action === "hold" ? gate.reason : "triage auto-promote is disabled for this project";
+  } else {
+    // Record the score even when a non-confidence blocker holds the ticket, so
+    // the trail shows what triage actually reported.
+    recordConfidence(ctx, project.name, issue.number, "triage", result.confidence, thresholdFor(project, "triage"));
+  }
 
   try {
     await upsertStatusComment(project, issue.number, [
@@ -364,7 +373,7 @@ export async function finishTriaged(
       "",
       promote
         ? "Promoted to `fleet:ready` — a coding worker will claim it on a later cycle."
-        : `Held for review — ${held}.`,
+        : `Held for review${held ? ` — ${held}` : ""}.`,
     ].join("\n"));
   } catch (err) {
     logError("loop", `${scope}: could not post the triage status comment`, err);
