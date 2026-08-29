@@ -91,6 +91,27 @@ describe("syncTemplates", () => {
     expect(epicForm).toContain('labels: ["fleet:plan", "fleet:ready"]');
   });
 
+  it("stamps the systematic-debugging skill into the target repo", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "fleet-sync-"));
+    repoDirs.push(repoPath);
+
+    await syncTemplates([makeProject({ repoPath })]);
+
+    const dest = join(repoPath, ".claude", "skills", "systematic-debugging", "SKILL.md");
+    expect(existsSync(dest)).toBe(true);
+    expect(readFileSync(dest, "utf8")).toContain("systematic-debugging");
+  });
+
+  it("keeps the fleet-backlog skill alongside the systematic-debugging skill", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "fleet-sync-"));
+    repoDirs.push(repoPath);
+
+    await syncTemplates([makeProject({ repoPath })]);
+
+    expect(existsSync(join(repoPath, ".claude", "skills", "fleet-backlog", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(repoPath, ".claude", "skills", "systematic-debugging", "SKILL.md"))).toBe(true);
+  });
+
   it("adds a task form per non-default fleet.yaml profile, in fleet.yaml's declared order", async () => {
     const repoPath = mkdtempSync(join(tmpdir(), "fleet-sync-"));
     repoDirs.push(repoPath);

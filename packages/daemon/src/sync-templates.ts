@@ -7,6 +7,11 @@ import { log, logError } from "./log.ts";
 
 const TEMPLATES_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..", "templates");
 const SKILL_TEMPLATE_PATH = join(TEMPLATES_DIR, "fleet-backlog", "SKILL.md");
+const DEBUGGING_SKILL_TEMPLATE_PATH = join(TEMPLATES_DIR, "systematic-debugging", "SKILL.md");
+const SKILL_TEMPLATES: Array<{ templatePath: string; destSubdir: string }> = [
+  { templatePath: SKILL_TEMPLATE_PATH, destSubdir: "fleet-backlog" },
+  { templatePath: DEBUGGING_SKILL_TEMPLATE_PATH, destSubdir: "systematic-debugging" },
+];
 const MCP_TEMPLATE_PATH = join(TEMPLATES_DIR, "mcp.json.example");
 
 const BOM = String.fromCharCode(0xfeff);
@@ -197,12 +202,14 @@ function pruneStaleIssueForms(destDir: string, keep: Set<string>): string[] {
   return removed;
 }
 
-function syncSkill(project: ProjectConfig): string {
-  const skillTemplate = readFileSync(SKILL_TEMPLATE_PATH, "utf8");
-  const destPath = join(project.repoPath, ".claude", "skills", "fleet-backlog", "SKILL.md");
-  mkdirSync(dirname(destPath), { recursive: true });
-  writeFileSync(destPath, skillTemplate);
-  return destPath;
+function syncSkills(project: ProjectConfig): string[] {
+  return SKILL_TEMPLATES.map(({ templatePath, destSubdir }) => {
+    const skillTemplate = readFileSync(templatePath, "utf8");
+    const destPath = join(project.repoPath, ".claude", "skills", destSubdir, "SKILL.md");
+    mkdirSync(dirname(destPath), { recursive: true });
+    writeFileSync(destPath, skillTemplate);
+    return destPath;
+  });
 }
 
 function syncIssueForms(project: ProjectConfig): string[] {
@@ -247,7 +254,9 @@ export async function syncTemplates(projects: ProjectConfig[], opts: { port?: nu
       log("sync-templates", `WARNING: skipping ${project.name} — repoPath ${project.repoPath} does not exist`);
       continue;
     }
-    log("sync-templates", `wrote ${syncSkill(project)}`);
+    for (const destPath of syncSkills(project)) {
+      log("sync-templates", `wrote ${destPath}`);
+    }
     for (const destPath of syncIssueForms(project)) {
       log("sync-templates", `wrote ${destPath}`);
     }
