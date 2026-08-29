@@ -93,6 +93,18 @@ All three are thin wrappers over the REST endpoints above; GitHub issues stay th
 
 Labeling an issue `fleet:plan` runs it as a read-only planning session instead of a coding one: the worker explores the repo for context but never writes files or commits, and its structured result is a list of self-contained, PR-sized child tickets (each with a title, body, optional priority, and an honest `light`/`standard`/`elevated` tier guess) rather than a diff. On completion, fleet files each child as its own issue — tagged with its suggested tier label and, if the project sets `planChildrenReady: true`, `fleet:ready` immediately; otherwise a human labels children ready individually. The epic issue itself goes straight to `fleet:review` with the child list in its status comment, never opens a PR, and a blocked decomposition works exactly like a blocked coding ticket (question posted, session held open for a reply).
 
+## Triage (`fleet:triage`)
+
+Issues carrying no `fleet:*` label are invisible to the board by design — `listFleetIssues` fetches every open issue each cycle and discards the rest. Triage is the way one of those gets into the pipeline without a human writing the spec by hand.
+
+With `triage: true` on a project, the dashboard's **Triage** panel lists its non-fleet open issues and offers an **Investigate** button per issue. Investigate does nothing but add a `fleet:triage` label; the ordinary claim loop picks it up on the next cycle, so pickup takes up to `pollIntervalSeconds`. Intake lint is bypassed for these claims — a triage candidate is by definition a half-formed issue, and producing the missing sections is the whole point.
+
+The session runs read-only (the same `git commit` denial a `fleet:plan` session gets, on top of the usual push/PR/label restrictions) and invokes the vendored `systematic-debugging` skill that `sync-templates` stamps into each repo. Its structured result is a root cause, `file:line` evidence, a whole-number confidence percentage, and a spec with `## Problem` / `## Acceptance criteria` / `## Verification` sections.
+
+On completion the spec is appended to the issue body and the issue is promoted to `fleet:ready` — plus its suggested tier label — when confidence is at or above `triageAutoPromoteThreshold` (default 80). Everything else holds at `fleet:needs-input`: a confidence below the threshold, a blocked result, a session error, or a human having edited the issue body while the investigation ran. **Triage fails closed**, the inverse of machine review's fail-open, because a triage that promoted on a failure would start an unsupervised coding session on an undiagnosed bug.
+
+That last case is worth spelling out. A triage session runs for minutes, so a human can edit the issue underneath it. Fleet hashes the issue body at claim time and re-checks it before writing; on a mismatch it leaves the body alone, posts the spec as a separate comment, and holds — regardless of confidence. Detection compares the body hash rather than the issue's `updatedAt`, because fleet's own label swaps, status-comment updates, and heartbeat refreshes all bump `updatedAt` during a normal run.
+
 ## Review feedback and recovery
 
 A few things happen automatically without reclaiming a ticket from `fleet:ready`:
