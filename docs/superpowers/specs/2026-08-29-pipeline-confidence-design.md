@@ -117,9 +117,10 @@ for URLs). Stamping makes every entry self-describing, so the same rendering
 code colors live and archived tickets correctly with no config lookup on the
 client at all.
 
-`triageConfidence` is retained unchanged. Triage writes both it and a
-`confidenceHistory` entry, and the existing auto-promote comparison keeps reading
-the field it already reads, so this change cannot regress triage behavior.
+`triageConfidence` is retained and still written, so existing records and any
+consumer of that field keep working — but it is no longer read for the promote
+decision, which now comes from the shared gate (§4). It becomes a plain
+historical field rather than a control input.
 
 Entries are appended, never replaced. A machine-review fix round or an operator
 restart therefore leaves a visible trajectory rather than overwriting history —
@@ -133,9 +134,45 @@ a score that drops between stages is precisely the signal worth seeing.
 confidenceThreshold: z.number().int().min(0).max(100).default(70)
 ```
 
-It governs the plan, code, machine-review, and plan-review stages. Triage keeps
-its own `triageAutoPromoteThreshold`, whose auto-promote-or-hold semantics are
-distinct and already documented; no triage behavior changes.
+It governs **all five stages, triage included**. `triageAutoPromoteThreshold` is
+removed.
+
+Triage does not need its own bar. Its existing rule — at or above the threshold,
+auto-promote to `fleet:ready`; below it, hold in `fleet:needs-input`
+(`finish.ts:336-350`, `:381-382`) — is the general gate with "proceed" meaning
+"promote". Collapsing them means one number to reason about and one code path to
+maintain, and it makes triage a stage in the pipeline rather than a special case
+bolted to its side.
+
+Two consequences follow.
+
+**The "never auto-promote" sentinel becomes a boolean.** Today
+`triageAutoPromoteThreshold` is `.max(101)` where 101 means "hold every triage
+for human review" (`config.ts:55-62`). That trick cannot survive the merge — 101
+on a shared threshold would hold every stage of every ticket. The capability is
+worth keeping, so it moves to its own flag:
+
+```ts
+triageAutoPromote: z.boolean().default(true)
+```
+
+When `false`, triage records its score with `threshold: null` (recorded, not
+gated) and always holds. This is a mode, not a second threshold, so it doesn't
+reintroduce the thing being removed.
+
+**The triage bar moves from 80 to 70.** The two defaults differed. Rather than
+let that change behavior silently, loading a config that still contains
+`triageAutoPromoteThreshold` is a **startup error** naming the replacement
+(`confidenceThreshold`, or `triageAutoPromote: false` if the old value was 101).
+Zod strips unknown keys by default, so without an explicit check a project
+configured to never auto-promote would quietly begin promoting at 70 — the worst
+possible outcome of a config rename.
+
+**Held triage gains an override for free.** There is no "promote this triage"
+label or button today; a held triage ticket is terminal until a human edits the
+spec and re-labels `fleet:ready` (which claims it as a *code* ticket, not a
+re-triage). Once triage runs through the shared gate,
+`fleet:confidence-overridden` promotes it like any other stage.
 
 Per the `config-shape-change` skill, four files change together:
 
@@ -169,7 +206,13 @@ Call sites in `loop/supervise.ts` and `loop/finish.ts`:
 | `plan` | plan returns `completed`, before `planReviewGate` | hold; no child issues filed, epic stays out of `fleet:review` |
 | `machine-review` | reviewer result, alongside the existing verdict handling | hold |
 | `plan-review` | reviewer result, same | hold |
-| `triage` | unchanged | governed by `triageAutoPromoteThreshold` |
+| `triage` | `finishTriaged`, replacing the inline comparison at `finish.ts:341` | hold; not promoted to `fleet:ready` |
+
+For triage, `proceed` means "promote to `fleet:ready`" and `hold` means the
+existing `swapLabel(inProgress → needsInput)` path it already takes
+(`finish.ts:381-382`) — so the behavior it has today is preserved, expressed
+through the shared gate. The other two triage hold reasons (body edited
+mid-run, `blocked`) are untouched and still short-circuit before the gate.
 
 #### Ordering: gate before the reviewer
 
@@ -260,15 +303,12 @@ today.
 
 #### Triage stamps a null threshold when auto-promote is disabled
 
-`triageAutoPromoteThreshold` is `.default(80)` and never undefined, but its range
-is `.min(0).max(101)` where **101 is the documented sentinel for "never
-auto-promote"** (`config.ts:55-62`; the comparison is `confidence >= threshold`).
-Stamping 101 would paint every triage badge red on any project running
-manual-only triage.
-
-So triage stamps `threshold: null` when the configured value is 101, and the
-real number otherwise. A null-threshold entry means "recorded, not gated" and
-renders neutral rather than failing.
+With `triageAutoPromote: false` the score is informational: the ticket holds
+regardless, so there is no bar it can be said to have missed. Stamping the real
+threshold would paint every such badge red on a project that deliberately
+reviews every triage by hand. Triage therefore stamps `threshold: null` in that
+mode, which renders neutral — "recorded, not gated" — and the shared gate skips
+the comparison entirely rather than special-casing a sentinel number.
 
 ### 5. Dashboard
 
@@ -328,6 +368,13 @@ silently rather than showing a zero or a placeholder.
   never holds; the override path removes the label, marks the entry
   `overridden`, and proceeds; a `removeLabel` failure holds instead of
   proceeding; the override does not apply to a second gate on the same ticket.
+- Config tests: a config still carrying `triageAutoPromoteThreshold` fails to
+  load with a message naming `confidenceThreshold` and `triageAutoPromote`.
+- Triage gate tests, adapted from the existing auto-promote tests: at or above
+  the threshold promotes to `fleet:ready`; below it holds in
+  `fleet:needs-input`; `triageAutoPromote: false` always holds and stamps a null
+  threshold; `fleet:confidence-overridden` promotes a would-be-held triage; the
+  body-edited and `blocked` hold reasons still short-circuit before the gate.
 - Additions to the existing finish/supervise tests, one pair per gated stage:
   above threshold proceeds normally; below threshold holds, applies
   `fleet:needs-input`, and asserts nothing was pushed, no PR opened, and for the
@@ -359,7 +406,6 @@ daemon run per the `verify` skill.
 - Any retry or self-correction round driven by a low score. Below-threshold
   holds and waits for a human; the machine-review gate's existing one-shot fix
   round is unchanged.
-- Reworking or renaming `triageAutoPromoteThreshold`.
 - Backfilling `confidenceHistory` for existing tickets.
 - A dashboard button for the override. Applying
   `fleet:confidence-overridden` from the issue is the v1 affordance; a
